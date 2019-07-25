@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 470 470">
+    <path d="M 0 0 L 200 -65 L 200 270 L 0 335 L 0 0 Z " stroke="none" fill="#00E0FF" transform="matrix(1 0 0 1 0 100)" fill-opacity="1"/>
+    <path d="M 0 0 L -200 -65 L -200 270 L 0 335 L 0 0 Z " stroke="none" fill="#00ADFF" transform="matrix(1 0 0 1 470 100)" fill-opacity="1"/>
+    <path d="M 235 0 L 235 470 " stroke="#4D4D4D" stroke-width="20" stroke-dasharray="50 20" transform="matrix(1 0 0 1 0 0)"/>
+</svg>

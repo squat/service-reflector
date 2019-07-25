@@ -1,0 +1,109 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: service-reflector
+  labels:
+    app.kubernetes.io/name: service-reflector
+data:
+  source-api: ""
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: service-reflector
+  labels:
+    app.kubernetes.io/name: service-reflector
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: service-reflector
+  labels:
+    app.kubernetes.io/name: service-reflector
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - services
+  - endpoints
+  verbs:
+  - list
+  - watch
+  - get
+  - create
+  - update
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: service-reflector
+  labels:
+    app.kubernetes.io/name: service-reflector
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: service-reflector
+subjects:
+- kind: ServiceAccount
+  name: service-reflector
+  namespace: default
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: service-reflector
+  labels:
+    app.kubernetes.io/name: service-reflector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: service-reflector
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: service-reflector
+    spec:
+      serviceAccountName: service-reflector
+      containers:
+      - name: service-reflector
+        image: squat/service-reflector
+        args:
+        - --secure-port=6443
+        - --insecure-port=8080
+        - --insecure-bind-address=0.0.0.0
+        - --reflector.source-api=$(SOURCE_API)
+        - --listen=0.0.0.0:9090
+        env:
+        - name: SOURCE_API
+          valueFrom:
+            configMapKeyRef:
+              name: service-reflector
+              key: source-api
+        ports:
+        - containerPort: 9090
+          name: metrics
+        - containerPort: 8080
+          name: http
+        - containerPort: 6443
+          name: https
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: service-reflector
+  labels:
+    app.kubernetes.io/name: service-reflector
+spec:
+  ports:
+  - name: metrics
+    port: 9090
+    targetPort: 9090
+  - name: http
+    port: 8080
+    targetPort: 8080
+  - name: https
+    port: 6443
+    targetPort: 6443
+  selector:
+    app.kubernetes.io/name: service-reflector
