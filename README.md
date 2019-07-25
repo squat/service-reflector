@@ -9,10 +9,10 @@ Service-Reflector mirrors Kubernetes Services so that Pods running in one cluste
 
 ## Overview
 
-One key use for multi-cluster Kubernetes is to allow Pods and Services in one cluster to access those running in another cluster.
-However, when a Service runs in cluster A, there is no Kubernetes-native way for a Pod n cluster B to discover the Service or its endpoints, and it must be pointed explicitly at the Service's ClusterIP.
-A solution to this issue is for an administrator to create a Service in cluster B to mirror the Service in cluster A with Endpoints that point directly at the Pods in cluster A.
-Service-Reflector simplifies running multi-cluster Services by automatically mirroring selected Services from one cluster to another.
+A key use for multi-cluster Kubernetes is to allow Pods and Services in one cluster to access those running in another cluster.
+However, a Pod in cluster A has no Kubernetes-native way of discovering a Service in cluster B or determining its endpoints; instead it must be pointed explicitly at the Service's ClusterIP.
+One solution to this issue is for an administrator to create a Service in cluster A to mirror the one in cluster B with Endpoints that point at the Service’s Pods.
+Service-Reflector automates the mirroring of selected Services from one cluster to another to simplify running multi-cluster Kubernetes.
 
 ## How it works
 
@@ -30,10 +30,10 @@ The source APIs can be any Kubernetes-style API that allows listing and watching
 ### Emitter
 
 In order allow a Reflector in cluster A to find Services in cluster B, we must point the Reflector at a source API, namely cluster B's Kubernetes apiserver.
-Doing so requires configuring the Refelctor with a Kubeconfig or ServiceAccount token from cluster B.
-Another option is to use an Emitter, a Kubernetes-style API that implements listing and watching for Services and Endpoints.
-The only information a Reflecter needs to access an Emitter's API is the Emitter's URL, which simplifies deployment.
-Furthermore, the Emitter allows an administrator to specify a selector to limit what Services are exposed to the reflector; this is done via the `--emitter.selector` flag.
+Doing so requires configuring the Reflector with a Kubeconfig or ServiceAccount token from cluster B.
+To simplify deployment, Service-Reflector provides an Emitter, a Kubernetes-style apiserver that implements only the list and watch verbs for Services and Endpoints.
+The only details a Reflector needs to access an Emitter's API is the Emitter's URL.
+Furthermore, the Emitter allows an administrator to specify a selector to limit which Services are exposed to the Reflector; this is done via the `--emitter.selector` flag.
 
 ## Installing on Kubernetes
 
