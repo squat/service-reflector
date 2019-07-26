@@ -17,7 +17,7 @@ Service-Reflector automates the mirroring of selected Services from one cluster 
 ## How it works
 
 Service-Reflector is comprised of two components: a Reflector and an Emitter.
-By default, both components are run, though either can be disabled, via the `--reflector=false` and `--emitter=false` flags.
+Both components are run by default, though either can be run independently or disabled, via the `--reflector` and `--emitter` flags.
 
 ### Reflector
 
