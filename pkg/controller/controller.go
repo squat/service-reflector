@@ -462,7 +462,7 @@ func (c *Controller) servicesEquivalent(a, b *v1.Service) bool {
 // parameters against the local API.
 func (c *Controller) deleteLocal(ns, name, api string) error {
 	// First try to delete the Service.
-	obj, exists, err := c.localInformers.service.GetStore().GetByKey("ns" + "/" + name)
+	obj, exists, err := c.localInformers.service.GetStore().GetByKey(ns + "/" + name)
 	if err != nil {
 		return fmt.Errorf("failed to get Service %s in namespace %s for API %s locally", name, ns, api)
 	}
@@ -481,7 +481,7 @@ func (c *Controller) deleteLocal(ns, name, api string) error {
 		return fmt.Errorf("failed to delete Service %s in namespace %s for API %s", name, ns, api)
 	}
 	// Next try to delete the Endpoints.
-	obj, exists, err = c.localInformers.endpoints.GetStore().GetByKey("ns" + "/" + name)
+	obj, exists, err = c.localInformers.endpoints.GetStore().GetByKey(ns + "/" + name)
 	if err != nil {
 		return fmt.Errorf("failed to get Endpounts %s in namespace %s for API %s locally", name, ns, api)
 	}
