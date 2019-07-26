@@ -16,6 +16,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"sync"
 
 	v1 "k8s.io/api/core/v1"
@@ -71,6 +72,9 @@ func (s *endpointsStorage) NewList() runtime.Object {
 }
 
 func (s *endpointsStorage) List(ctx context.Context, options *metainternalversion.ListOptions) (runtime.Object, error) {
+	if !s.Informer().HasSynced() {
+		return nil, errors.New("backend is not ready")
+	}
 	el := &v1.EndpointsList{}
 	es, err := s.Lister().List(mergeSelectors(s.selector, options))
 	if err != nil {
@@ -128,6 +132,9 @@ func (s *serviceStorage) NewList() runtime.Object {
 }
 
 func (s *serviceStorage) List(ctx context.Context, options *metainternalversion.ListOptions) (runtime.Object, error) {
+	if !s.Informer().HasSynced() {
+		return nil, errors.New("backend is not ready")
+	}
 	sl := &v1.ServiceList{}
 	ss, err := s.Lister().List(mergeSelectors(s.selector, options))
 	if err != nil {
