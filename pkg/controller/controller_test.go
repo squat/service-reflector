@@ -408,51 +408,6 @@ func TestController(t *testing.T) {
 			},
 		},
 		{
-			name:     "Mismatched Selector",
-			selector: "foo=bar",
-			clients: []*NamedClient{
-				{
-					Name:   "foo",
-					Client: fake.NewSimpleClientset(),
-				},
-			},
-			events: []event{
-				createEvent("foo", &v1.Service{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "foo",
-						Namespace: "bar",
-					},
-					Spec: v1.ServiceSpec{
-						Ports: []v1.ServicePort{
-							{
-								Port: 80,
-							},
-						},
-					},
-				}),
-				createEvent("foo", &v1.Endpoints{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "foo",
-						Namespace: "bar",
-					},
-					Subsets: []v1.EndpointSubset{
-						{
-							Addresses: []v1.EndpointAddress{
-								{
-									IP: "10.0.0.1",
-								},
-							},
-							Ports: []v1.EndpointPort{
-								{
-									Port: 8080,
-								},
-							},
-						},
-					},
-				}),
-			},
-		},
-		{
 			name: "ExternalName",
 			clients: []*NamedClient{
 				{
@@ -641,6 +596,8 @@ func TestController(t *testing.T) {
 				}
 			}()
 
+			// Allow the informers time to sync.
+			<-time.After(100 * time.Millisecond)
 			for _, ev := range tt.events {
 				ev(t, clients)
 			}
