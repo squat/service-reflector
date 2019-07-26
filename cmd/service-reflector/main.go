@@ -32,7 +32,7 @@ import (
 	"github.com/oklog/run"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	flag "github.com/spf13/pflag"
+	"github.com/spf13/pflag"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -98,87 +98,172 @@ func (u *urls) Type() string {
 	return "url"
 }
 
-type arrayVar []string
+type options struct {
+	kubeconfig   string
+	listen       string
+	logLevel     string
+	namespace    string
+	printVersion bool
 
-func (a *arrayVar) String() string {
-	s := make([]string, len(*a))
-	for i := range *a {
-		s[i] = (*a)[i]
-	}
-	return strings.Join(s, ", ")
+	runEmitter         bool
+	emitterSelectorRaw string
+	secure             *genericoptions.SecureServingOptionsWithLoopback
+	insecure           *genericoptions.DeprecatedInsecureServingOptions
+
+	runReflector         bool
+	apis                 urls
+	apiKubeconfigs       []string
+	reflectorSelectorRaw string
+
+	// Completed fields
+	client                   kubernetes.Interface
+	factory                  informers.SharedInformerFactory
+	logger                   log.Logger
+	emitterSelector          labels.Selector
+	insecureServingInfo      *server.DeprecatedInsecureServingInfo
+	apiserverConfig          *apiserver.Config
+	apiserverCompletedConfig apiserver.CompletedConfig
 }
 
-func (a *arrayVar) Set(v string) error {
-	*a = append(*a, v)
+func newOptions() *options {
+	return &options{
+		secure: (&genericoptions.SecureServingOptions{
+			BindAddress: net.ParseIP("0.0.0.0"),
+			BindPort:    6443,
+			ServerCert: genericoptions.GeneratableKeyCert{
+				PairName:      "emitter",
+				CertDirectory: "emitter.local.config/certificates",
+			},
+		}).WithLoopback(),
+		insecure: &genericoptions.DeprecatedInsecureServingOptions{BindAddress: net.ParseIP("0.0.0.0"), BindPort: 8080},
+	}
+}
+
+func (o *options) complete() []error {
+	var errs []error
+
+	errs = append(errs, o.secure.Validate()...)
+	errs = append(errs, o.insecure.Validate()...)
+
+	o.emitterSelector = labels.Everything()
+	if o.emitterSelectorRaw != "" {
+		emitterSelectorSet, err := labels.ConvertSelectorToLabelsMap(o.emitterSelectorRaw)
+		if err != nil {
+			errs = append(errs, err)
+		} else {
+			o.emitterSelector = emitterSelectorSet.AsSelector()
+		}
+	}
+
+	if o.reflectorSelectorRaw != "" {
+		_, err := labels.ConvertSelectorToLabelsMap(o.reflectorSelectorRaw)
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	o.logger = log.NewJSONLogger(log.NewSyncWriter(os.Stdout))
+	o.logger = log.With(o.logger, "ts", log.DefaultTimestampUTC)
+	o.logger = log.With(o.logger, "caller", log.DefaultCaller)
+	switch o.logLevel {
+	case logLevelAll:
+		o.logger = level.NewFilter(o.logger, level.AllowAll())
+	case logLevelDebug:
+		o.logger = level.NewFilter(o.logger, level.AllowDebug())
+	case logLevelInfo:
+		o.logger = level.NewFilter(o.logger, level.AllowInfo())
+	case logLevelWarn:
+		o.logger = level.NewFilter(o.logger, level.AllowWarn())
+	case logLevelError:
+		o.logger = level.NewFilter(o.logger, level.AllowError())
+	case logLevelNone:
+		o.logger = level.NewFilter(o.logger, level.AllowNone())
+	default:
+		errs = append(errs, fmt.Errorf("log level %v unknown; possible values are: %s", o.logLevel, availableLogLevels))
+	}
+
+	config, err := clientcmd.BuildConfigFromFlags("", o.kubeconfig)
+	if err != nil {
+		errs = append(errs, fmt.Errorf("failed to create Kubernetes config: %v", err))
+	} else {
+		o.client = kubernetes.NewForConfigOrDie(config)
+		o.factory = informers.NewSharedInformerFactoryWithOptions(o.client, 5*time.Minute, informers.WithNamespace(o.namespace), informers.WithTweakListOptions(func(*metav1.ListOptions) {}))
+
+	}
+	if err := o.completeEmitter(); err != nil {
+		errs = append(errs, err)
+	}
+	return errs
+}
+
+func (o *options) completeEmitter() error {
+	if !o.runEmitter {
+		return nil
+	}
+	o.insecureServingInfo = &server.DeprecatedInsecureServingInfo{}
+	if err := o.insecure.ApplyTo(&o.insecureServingInfo); err != nil {
+		return err
+	}
+	if err := o.secure.MaybeDefaultWithSelfSignedCerts("localhost", nil, []net.IP{net.ParseIP("127.0.0.1")}); err != nil {
+		return fmt.Errorf("error creating self-signed certificates: %v", err)
+	}
+	o.apiserverConfig = &apiserver.Config{
+		GenericConfig: genericapiserver.NewConfig(apiserver.Codecs),
+		ExtraConfig: apiserver.ExtraConfig{
+			Selector: o.emitterSelector,
+		},
+	}
+	if err := o.secure.ApplyTo(&o.apiserverConfig.GenericConfig.SecureServing, &o.apiserverConfig.GenericConfig.LoopbackClientConfig); err != nil {
+		return err
+	}
+	o.apiserverCompletedConfig = o.apiserverConfig.Complete(o.factory)
 	return nil
 }
 
-func (a *arrayVar) Type() string {
-	return "string"
+func (o *options) flagSet() *pflag.FlagSet {
+	f := pflag.NewFlagSet("service-reflector", pflag.ExitOnError)
+	f.StringVar(&o.kubeconfig, "kubeconfig", "", "Path to kubeconfig.")
+	f.StringVar(&o.listen, "listen", ":9090", "The address at which to listen for health and metrics.")
+	f.StringVar(&o.logLevel, "log-level", logLevelInfo, fmt.Sprintf("Log level to use. Possible values: %s", availableLogLevels))
+	f.StringVar(&o.namespace, "namespace", metav1.NamespaceAll, "Namespace to watch for Services.")
+	f.BoolVar(&o.printVersion, "version", false, "Print version and exit")
+	f.BoolVar(&o.runEmitter, "emitter", true, "Run the Service-Emitter.")
+	f.BoolVar(&o.runReflector, "reflector", true, "Run the Service-Reflector.")
+
+	emitter := pflag.NewFlagSet("emitter", pflag.ExitOnError)
+	emitter.SetNormalizeFunc(func(_ *pflag.FlagSet, name string) pflag.NormalizedName {
+		return pflag.NormalizedName("emitter." + name)
+	})
+	emitter.StringVar(&o.emitterSelectorRaw, "selector", "", "Selector to limit what services are emitted app.kubernetes.io/name=foo")
+
+	reflector := pflag.NewFlagSet("reflector", pflag.ExitOnError)
+	reflector.SetNormalizeFunc(func(_ *pflag.FlagSet, name string) pflag.NormalizedName {
+		return pflag.NormalizedName("reflector." + name)
+	})
+	reflector.Var(&o.apis, "source-api", "The address of a Kubernetes API server from which to reflect Services.")
+	reflector.StringArrayVar(&o.apiKubeconfigs, "source-kubeconfig", []string{}, "Path to a Kubeconfig for a Kubernetes API server from which to reflect Services.")
+	reflector.StringVar(&o.reflectorSelectorRaw, "selector", "", "Selector to limit what services are reflected locally, e.g. app.kubernetes.io/name=foo")
+
+	o.insecure.AddFlags(emitter)
+	o.secure.AddFlags(emitter)
+	f.AddFlagSet(emitter)
+	f.AddFlagSet(reflector)
+	return f
 }
 
 // Main is the principal function for the binary, wrapped only by `main` for convenience.
 func Main() error {
-	kubeconfig := flag.String("kubeconfig", "", "Path to kubeconfig.")
-	listen := flag.String("listen", ":9090", "The address at which to listen for health and metrics.")
-	logLevel := flag.String("log-level", logLevelInfo, fmt.Sprintf("Log level to use. Possible values: %s", availableLogLevels))
-	var apis urls
-	namespace := flag.String("namespace", metav1.NamespaceAll, "Namespace to watch for Services.")
-	runEmitter := flag.Bool("emitter", true, "Run the Service-Emitter.")
-	emitterSelector := flag.String("emitter.selector", "", "Selector to limit what services are emitted app.kubernetes.io/name=foo")
-	runReflector := flag.Bool("reflector", true, "Run the Service-Reflector.")
-	flag.Var(&apis, "reflector.source-api", "The address of a Kubernetes API server from which to reflect Services.")
-	var apiKubeconfigs arrayVar
-	flag.Var(&apiKubeconfigs, "reflector.source-kubeconfig", "Path to a Kubeconfig for a Kubernetes API server from which to reflect Services.")
-	reflectorSelector := flag.String("reflector.selector", "", "Selector to limit what services are reflected locally, e.g. app.kubernetes.io/name=foo")
-	printVersion := flag.Bool("version", false, "Print version and exit")
-	secure := genericoptions.NewSecureServingOptions().WithLoopback()
-	insecure := genericoptions.DeprecatedInsecureServingOptions{}
-	insecure.AddFlags(flag.CommandLine)
-	secure.AddFlags(flag.CommandLine)
-	flag.Parse()
+	o := newOptions()
+	o.flagSet().Parse(os.Args[1:])
 
-	if err := secure.Validate(); len(err) != 0 {
-		return multiError(err)
-	}
-
-	if err := insecure.Validate(); len(err) != 0 {
-		return multiError(err)
-	}
-
-	if *printVersion {
+	if o.printVersion {
 		fmt.Println(version.Version)
 		return nil
 	}
 
-	eSelector := labels.Everything()
-	if *emitterSelector != "" {
-		emitterSelectorSet, err := labels.ConvertSelectorToLabelsMap(*emitterSelector)
-		if err != nil {
-			return err
-		}
-		eSelector = emitterSelectorSet.AsSelector()
+	if errs := o.complete(); len(errs) != 0 {
+		return multiError(errs)
 	}
-
-	logger := log.NewJSONLogger(log.NewSyncWriter(os.Stdout))
-	switch *logLevel {
-	case logLevelAll:
-		logger = level.NewFilter(logger, level.AllowAll())
-	case logLevelDebug:
-		logger = level.NewFilter(logger, level.AllowDebug())
-	case logLevelInfo:
-		logger = level.NewFilter(logger, level.AllowInfo())
-	case logLevelWarn:
-		logger = level.NewFilter(logger, level.AllowWarn())
-	case logLevelError:
-		logger = level.NewFilter(logger, level.AllowError())
-	case logLevelNone:
-		logger = level.NewFilter(logger, level.AllowNone())
-	default:
-		return fmt.Errorf("log level %v unknown; possible values are: %s", *logLevel, availableLogLevels)
-	}
-	logger = log.With(logger, "ts", log.DefaultTimestampUTC)
-	logger = log.With(logger, "caller", log.DefaultCaller)
 
 	r := prometheus.NewRegistry()
 	r.MustRegister(
@@ -186,52 +271,29 @@ func Main() error {
 		prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}),
 	)
 
-	config, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
-	if err != nil {
-		return fmt.Errorf("failed to create Kubernetes config: %v", err)
-	}
-	client := kubernetes.NewForConfigOrDie(config)
-	factory := informers.NewSharedInformerFactoryWithOptions(client, 5*time.Minute, informers.WithNamespace(*namespace), informers.WithTweakListOptions(func(*metav1.ListOptions) {}))
-
 	var g run.Group
 	{
 		// Start the informer factory.
 		stop := make(chan struct{})
 		g.Add(func() error {
-			factory.Core().V1().Endpoints().Informer()
-			factory.Core().V1().Services().Informer()
-			logger.Log("msg", "starting informers")
-			factory.Start(stop)
-			syncs := factory.WaitForCacheSync(stop)
+			o.factory.Core().V1().Endpoints().Informer()
+			o.factory.Core().V1().Services().Informer()
+			o.logger.Log("msg", "starting informers")
+			o.factory.Start(stop)
+			syncs := o.factory.WaitForCacheSync(stop)
 			if !syncs[reflect.TypeOf(&v1.Service{})] || !syncs[reflect.TypeOf(&v1.Endpoints{})] {
 				return errors.New("failed to sync informer caches")
 			}
-			logger.Log("msg", "successfully synced informer caches")
+			o.logger.Log("msg", "successfully synced informer caches")
 			<-stop
 			return nil
 		}, func(error) {
 			close(stop)
 		})
 	}
-	if *runEmitter {
+	if o.runEmitter {
 		// Configure the service-emitter.
-		insecureInfo := &server.DeprecatedInsecureServingInfo{}
-		if err := insecure.ApplyTo(&insecureInfo); err != nil {
-			return err
-		}
-		if err := secure.MaybeDefaultWithSelfSignedCerts("localhost", nil, []net.IP{net.ParseIP("127.0.0.1")}); err != nil {
-			return fmt.Errorf("error creating self-signed certificates: %v", err)
-		}
-		cfg := &apiserver.Config{
-			GenericConfig: genericapiserver.NewConfig(apiserver.Codecs),
-			ExtraConfig: apiserver.ExtraConfig{
-				Selector: eSelector,
-			},
-		}
-		if err := secure.ApplyTo(&cfg.GenericConfig.SecureServing, &cfg.GenericConfig.LoopbackClientConfig); err != nil {
-			return err
-		}
-		emitter, err := cfg.Complete(factory).New()
+		emitter, err := o.apiserverCompletedConfig.New()
 		if err != nil {
 			return err
 		}
@@ -240,19 +302,19 @@ func Main() error {
 			// Run the service-emitter.
 			stop := make(chan struct{})
 			g.Add(func() error {
-				logger.Log("msg", "starting emitter on HTTPS")
+				o.logger.Log("msg", "starting emitter on HTTPS")
 				return emitter.GenericAPIServer.PrepareRun().Run(stop)
 			}, func(error) {
 				close(stop)
 			})
 		}
-		if insecureInfo.Listener != nil {
+		if o.insecureServingInfo.Listener != nil {
 			// Run the insecure service-emitter.
 			stop := make(chan struct{})
-			handler := genericapifilters.WithRequestInfo(emitter.GenericAPIServer.UnprotectedHandler(), server.NewRequestInfoResolver(cfg.GenericConfig))
+			handler := genericapifilters.WithRequestInfo(emitter.GenericAPIServer.UnprotectedHandler(), server.NewRequestInfoResolver(o.apiserverConfig.GenericConfig))
 			g.Add(func() error {
-				logger.Log("msg", "starting emitter on HTTP")
-				if err := insecureInfo.Serve(handler, cfg.GenericConfig.RequestTimeout, stop); err != nil {
+				o.logger.Log("msg", "starting emitter on HTTP")
+				if err := o.insecureServingInfo.Serve(handler, o.apiserverConfig.GenericConfig.RequestTimeout, stop); err != nil {
 					return err
 				}
 				<-stop
@@ -269,13 +331,13 @@ func Main() error {
 			w.WriteHeader(http.StatusOK)
 		})
 		mux.Handle("/metrics", promhttp.HandlerFor(r, promhttp.HandlerOpts{}))
-		l, err := net.Listen("tcp", *listen)
+		l, err := net.Listen("tcp", o.listen)
 		if err != nil {
-			return fmt.Errorf("failed to listen on %s: %v", *listen, err)
+			return fmt.Errorf("failed to listen on %s: %v", o.listen, err)
 		}
 
 		g.Add(func() error {
-			logger.Log("msg", "starting metrics server")
+			o.logger.Log("msg", "starting metrics server")
 			if err := http.Serve(l, mux); err != nil && err != http.ErrServerClosed {
 				return fmt.Errorf("error: server exited unexpectedly: %v", err)
 			}
@@ -284,32 +346,31 @@ func Main() error {
 			l.Close()
 		})
 	}
-	if *runReflector && len(apis)+len(apiKubeconfigs) != 0 {
+	if o.runReflector && len(o.apis)+len(o.apiKubeconfigs) != 0 {
 		// Configure the controller.
-		clients := make([]*controller.NamedClient, len(apis)+len(apiKubeconfigs))
-		for i := range apis {
-			config, err := clientcmd.BuildConfigFromFlags(apis[i].String(), "")
+		clients := make([]*controller.NamedClient, len(o.apis)+len(o.apiKubeconfigs))
+		for i := range o.apis {
+			config, err := clientcmd.BuildConfigFromFlags(o.apis[i].String(), "")
 			if err != nil {
 				return fmt.Errorf("failed to create Kubernetes config: %v", err)
 			}
 			clients[i] = &controller.NamedClient{Name: config.Host, Client: kubernetes.NewForConfigOrDie(config)}
 		}
-		for i := range apiKubeconfigs {
-			config, err := clientcmd.BuildConfigFromFlags("", apiKubeconfigs[i])
+		for i := range o.apiKubeconfigs {
+			config, err := clientcmd.BuildConfigFromFlags("", o.apiKubeconfigs[i])
 			if err != nil {
 				return fmt.Errorf("failed to create Kubernetes config: %v", err)
 			}
 			clients[i] = &controller.NamedClient{Name: config.Host, Client: kubernetes.NewForConfigOrDie(config)}
 		}
-		c := controller.New(client, factory, clients, *namespace, *reflectorSelector, log.With(logger, "component", "controller"))
+		c := controller.New(o.client, o.factory, clients, o.namespace, o.reflectorSelectorRaw, log.With(o.logger, "component", "controller"))
 		c.RegisterMetrics(r)
 
 		// Run the controller.
 		stop := make(chan struct{})
 		g.Add(func() error {
-			logger.Log("msg", "starting reflector")
-			c.Run(stop)
-			return nil
+			o.logger.Log("msg", "starting reflector")
+			return c.Run(stop)
 		}, func(error) {
 			close(stop)
 		})
@@ -323,7 +384,7 @@ func Main() error {
 			for {
 				select {
 				case <-term:
-					logger.Log("msg", "caught interrupt; gracefully cleaning up; see you next time!")
+					o.logger.Log("msg", "caught interrupt; gracefully cleaning up; see you next time!")
 					return nil
 				case <-cancel:
 					return nil

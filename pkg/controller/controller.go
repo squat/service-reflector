@@ -55,7 +55,6 @@ type Controller struct {
 	localInformers informerPair
 	logger         log.Logger
 	queue          workqueue.RateLimitingInterface
-	selector       string
 
 	reconcileAttempts prometheus.Counter
 	reconcileErrors   prometheus.Counter
@@ -77,7 +76,6 @@ func New(client kubernetes.Interface, factory informers.SharedInformerFactory, c
 		informers: make(map[string]informerPair),
 		logger:    logger,
 		queue:     workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "service-reflector"),
-		selector:  selector,
 
 		reconcileAttempts: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "service_reflector_reconcile_attempts_total",

@@ -69,9 +69,8 @@ spec:
       - name: service-reflector
         image: squat/service-reflector
         args:
-        - --secure-port=6443
-        - --insecure-port=8080
-        - --insecure-bind-address=0.0.0.0
+        - --emitter.secure-port=6443
+        - --emitter.insecure-port=8080
         - --reflector.source-api=$(SOURCE_API)
         - --listen=0.0.0.0:9090
         env:

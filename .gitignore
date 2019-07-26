@@ -3,4 +3,4 @@
 .manifest*
 .push*
 bin/
-apiserver.local.config/
+emitter.local.config/
