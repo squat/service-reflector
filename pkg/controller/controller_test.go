@@ -40,6 +40,10 @@ func createEvent(api string, obj metav1.Object) event {
 			if _, err := client.CoreV1().Services(v.Namespace).Create(v); err != nil {
 				t.Fatalf("failed to create Service: %v", err)
 			}
+		case *v1.Namespace:
+			if _, err := client.CoreV1().Namespaces().Create(v); err != nil {
+				t.Fatalf("failed to create namespace: %v", err)
+			}
 		default:
 			t.Fatalf("got unexpected type %T", v)
 		}
@@ -57,6 +61,10 @@ func deleteEvent(api string, obj metav1.Object) event {
 		case *v1.Service:
 			if err := client.CoreV1().Services(v.Namespace).Delete(v.Name, &metav1.DeleteOptions{}); err != nil {
 				t.Fatalf("failed to delete Service: %v", err)
+			}
+		case *v1.Namespace:
+			if err := client.CoreV1().Namespaces().Delete(v.Name, &metav1.DeleteOptions{}); err != nil {
+				t.Fatalf("failed to delete namespace: %v", err)
 			}
 		default:
 			t.Fatalf("got unexpected type %T", v)
@@ -157,6 +165,14 @@ func TestController(t *testing.T) {
 									Port: 8080,
 								},
 							},
+						},
+					},
+				},
+				&v1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "bar",
+						Labels: map[string]string{
+							reflectedLabelKey: "true",
 						},
 					},
 				},
@@ -313,6 +329,14 @@ func TestController(t *testing.T) {
 						},
 					},
 				},
+				&v1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "bar",
+						Labels: map[string]string{
+							reflectedLabelKey: "true",
+						},
+					},
+				},
 			},
 		},
 		{
@@ -450,6 +474,14 @@ func TestController(t *testing.T) {
 						Type: v1.ServiceTypeExternalName,
 					},
 				},
+				&v1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "bar",
+						Labels: map[string]string{
+							reflectedLabelKey: "true",
+						},
+					},
+				},
 			},
 		},
 		{
@@ -574,12 +606,232 @@ func TestController(t *testing.T) {
 						},
 					},
 				},
+				&v1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "bar",
+						Labels: map[string]string{
+							reflectedLabelKey: "true",
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "Don't Delete Namespace",
+			clients: []*NamedClient{
+				{
+					Name:   "foo",
+					Client: fake.NewSimpleClientset(),
+				},
+			},
+			events: []event{
+				createEvent("foo", &v1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "foo",
+						Namespace: "bar",
+					},
+					Spec: v1.ServiceSpec{
+						Ports: []v1.ServicePort{
+							{
+								Port: 80,
+							},
+						},
+					},
+				}),
+				createEvent("foo", &v1.Endpoints{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "foo",
+						Namespace: "bar",
+					},
+					Subsets: []v1.EndpointSubset{
+						{
+							Addresses: []v1.EndpointAddress{
+								{
+									IP: "10.0.0.1",
+								},
+							},
+							Ports: []v1.EndpointPort{
+								{
+									Port: 8080,
+								},
+							},
+						},
+					},
+				}),
+				createEvent("foo", &v1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "bar",
+						Namespace: "bar",
+					},
+					Spec: v1.ServiceSpec{
+						Ports: []v1.ServicePort{
+							{
+								Port: 80,
+							},
+						},
+					},
+				}),
+				createEvent("foo", &v1.Endpoints{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "bar",
+						Namespace: "bar",
+					},
+					Subsets: []v1.EndpointSubset{
+						{
+							Addresses: []v1.EndpointAddress{
+								{
+									IP: "10.0.0.1",
+								},
+							},
+							Ports: []v1.EndpointPort{
+								{
+									Port: 8080,
+								},
+							},
+						},
+					},
+				}),
+				deleteEvent("foo", &v1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "foo",
+						Namespace: "bar",
+					},
+					Spec: v1.ServiceSpec{
+						Ports: []v1.ServicePort{
+							{
+								Port: 80,
+							},
+						},
+					},
+				}),
+			},
+			expected: []metav1.Object{
+				&v1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "bar",
+						Namespace: "bar",
+						Labels: map[string]string{
+							reflectedLabelKey: "true",
+							sourceLabelKey:    "foo",
+						},
+					},
+					Spec: v1.ServiceSpec{
+						Ports: []v1.ServicePort{
+							{
+								Port: 80,
+							},
+						},
+					},
+				},
+				&v1.Endpoints{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "bar",
+						Namespace: "bar",
+						Labels: map[string]string{
+							reflectedLabelKey: "true",
+							sourceLabelKey:    "foo",
+						},
+					},
+					Subsets: []v1.EndpointSubset{
+						{
+							Addresses: []v1.EndpointAddress{
+								{
+									IP: "10.0.0.1",
+								},
+							},
+							Ports: []v1.EndpointPort{
+								{
+									Port: 8080,
+								},
+							},
+						},
+					},
+				},
+				&v1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "bar",
+						Labels: map[string]string{
+							reflectedLabelKey: "true",
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "Don't Manage Namespace",
+			clients: []*NamedClient{
+				{
+					Name:   "foo",
+					Client: fake.NewSimpleClientset(),
+				},
+			},
+			events: []event{
+				createEvent("local", &v1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "bar",
+					},
+				}),
+				createEvent("foo", &v1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "foo",
+						Namespace: "bar",
+					},
+					Spec: v1.ServiceSpec{
+						Ports: []v1.ServicePort{
+							{
+								Port: 80,
+							},
+						},
+					},
+				}),
+				createEvent("foo", &v1.Endpoints{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "foo",
+						Namespace: "bar",
+					},
+					Subsets: []v1.EndpointSubset{
+						{
+							Addresses: []v1.EndpointAddress{
+								{
+									IP: "10.0.0.1",
+								},
+							},
+							Ports: []v1.EndpointPort{
+								{
+									Port: 8080,
+								},
+							},
+						},
+					},
+				}),
+				deleteEvent("foo", &v1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "foo",
+						Namespace: "bar",
+					},
+					Spec: v1.ServiceSpec{
+						Ports: []v1.ServicePort{
+							{
+								Port: 80,
+							},
+						},
+					},
+				}),
+			},
+			expected: []metav1.Object{
+				&v1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "bar",
+					},
+				},
 			},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			client := fake.NewSimpleClientset()
-			clients := make(map[string]kubernetes.Interface)
+			clients := map[string]kubernetes.Interface{
+				"local": client,
+			}
 			for i := range tt.clients {
 				clients[tt.clients[i].Name] = tt.clients[i].Client
 			}
@@ -628,6 +880,14 @@ func TestController(t *testing.T) {
 					if !c.servicesEquivalent(s, v) {
 						t.Errorf("Services should be equivalent; expected:\n%v\ngot:\n%v", v, s)
 					}
+				case *v1.Namespace:
+					n, err := client.CoreV1().Namespaces().Get(v.Name, metav1.GetOptions{})
+					if err != nil {
+						t.Fatalf("failed to get namespace: %v", err)
+					}
+					if !reflect.DeepEqual(v, n) {
+						t.Errorf("expected namespace:\n%v\ngot:\n%v", v, n)
+					}
 				default:
 					t.Fatalf("got unexpected type %T", v)
 				}
@@ -645,6 +905,11 @@ func TestController(t *testing.T) {
 				t.Fatalf("failed to list Endpoints: %v", err)
 			}
 			n += len(e.Items)
+			ns, err := client.CoreV1().Namespaces().List(metav1.ListOptions{})
+			if err != nil {
+				t.Fatalf("failed to list namespaces: %v", err)
+			}
+			n += len(ns.Items)
 			if n != len(tt.expected) {
 				t.Errorf("expected %d resources, got %d", len(tt.expected), n)
 			}

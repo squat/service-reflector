@@ -278,6 +278,7 @@ func Main() error {
 		g.Add(func() error {
 			o.factory.Core().V1().Endpoints().Informer()
 			o.factory.Core().V1().Services().Informer()
+			o.factory.Core().V1().Namespaces().Informer()
 			o.logger.Log("msg", "starting informers")
 			o.factory.Start(stop)
 			syncs := o.factory.WaitForCacheSync(stop)

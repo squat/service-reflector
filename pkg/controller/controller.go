@@ -28,6 +28,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/informers"
 	coreinformers "k8s.io/client-go/informers/core/v1"
@@ -47,12 +48,18 @@ type informerPair struct {
 	service   cache.SharedIndexInformer
 }
 
+type informerSet struct {
+	endpoints coreinformers.EndpointsInformer
+	service   coreinformers.ServiceInformer
+	namespace coreinformers.NamespaceInformer
+}
+
 // Controller is able to reconcile local services against
 // services exposed by remote APIs.
 type Controller struct {
 	client         kubernetes.Interface
 	informers      map[string]informerPair
-	localInformers informerPair
+	localInformers informerSet
 	logger         log.Logger
 	queue          workqueue.RateLimitingInterface
 
@@ -88,9 +95,14 @@ func New(client kubernetes.Interface, factory informers.SharedInformerFactory, c
 		}),
 	}
 
-	c.localInformers = informerPair{
-		endpoints: factory.Core().V1().Endpoints().Informer(),
-		service:   factory.Core().V1().Services().Informer(),
+	// Ensure the informers are added to the factory list.
+	factory.Core().V1().Endpoints().Informer()
+	factory.Core().V1().Services().Informer()
+	factory.Core().V1().Namespaces().Informer()
+	c.localInformers = informerSet{
+		endpoints: factory.Core().V1().Endpoints(),
+		service:   factory.Core().V1().Services(),
+		namespace: factory.Core().V1().Namespaces(),
 	}
 	for i := range clients {
 		c.informers[clients[i].Name] = informerPair{
@@ -150,13 +162,13 @@ func (c *Controller) Run(stop <-chan struct{}) error {
 }
 
 func (c *Controller) addHandlers() {
-	c.localInformers.endpoints.AddEventHandler(cache.ResourceEventHandlerFuncs{
+	c.localInformers.endpoints.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    c.handleEvent(""),
 		UpdateFunc: func(_, obj interface{}) { c.handleEvent("")(obj) },
 		DeleteFunc: c.handleEvent(""),
 	})
 
-	c.localInformers.service.AddEventHandler(cache.ResourceEventHandlerFuncs{
+	c.localInformers.service.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    c.handleEvent(""),
 		UpdateFunc: func(_, obj interface{}) { c.handleEvent("")(obj) },
 		DeleteFunc: c.handleEvent(""),
@@ -192,7 +204,10 @@ func (c *Controller) waitForCacheSync(stop <-chan struct{}) error {
 		return ok1 && ok2
 	}
 
-	ok := syncPair(c.localInformers, "Kubernetes")
+	ok1 := sync(c.localInformers.endpoints.Informer(), "Kubernetes", "Endpoints")
+	ok2 := sync(c.localInformers.service.Informer(), "Kubernetes", "Service")
+	ok3 := sync(c.localInformers.namespace.Informer(), "Kubernetes", "namespace")
+	ok := ok1 && ok2 && ok3
 	for api, inf := range c.informers {
 		if !syncPair(inf, api) {
 			ok = false
@@ -289,13 +304,24 @@ func (c *Controller) sync(key string) error {
 		return errors.Wrap(c.deleteLocal(ns, name, api), "failed to delete local objects")
 	}
 
-	svc, end, err := c.generate(ns, name, api)
+	svc, end, namespace, err := c.generate(ns, name, api)
 	if err != nil {
 		return fmt.Errorf("failed to generate objects: %v", err)
 	}
 
-	// First take care of creating the Service.
-	obj, exists, err := c.localInformers.service.GetStore().GetByKey(ns + "/" + name)
+	// First create the namespace if necessary.
+	_, exists, err = c.localInformers.namespace.Informer().GetStore().GetByKey(ns)
+	if err != nil {
+		return fmt.Errorf("failed to get namespace %s locally: %v", ns, err)
+	}
+	if !exists {
+		_, err = c.client.CoreV1().Namespaces().Create(namespace)
+		if err != nil {
+			return fmt.Errorf("failed to create namespace %s: %v", ns, err)
+		}
+	}
+	// Next take care of creating the Service.
+	obj, exists, err := c.localInformers.service.Informer().GetStore().GetByKey(ns + "/" + name)
 	if err != nil {
 		return fmt.Errorf("failed to get Service %s in namespace %s for API %s locally: %v", name, ns, api, err)
 	}
@@ -321,7 +347,7 @@ func (c *Controller) sync(key string) error {
 	}
 
 	// Now take care of the Endpoints.
-	obj, exists, err = c.localInformers.endpoints.GetStore().GetByKey(ns + "/" + name)
+	obj, exists, err = c.localInformers.endpoints.Informer().GetStore().GetByKey(ns + "/" + name)
 	if err != nil {
 		return fmt.Errorf("failed to get Endpoints %s in namespace %s for API %s locally: %v", name, ns, api, err)
 	}
@@ -355,20 +381,29 @@ func (c *Controller) sync(key string) error {
 	return errors.Wrap(err, fmt.Sprintf("failed to create Endpoints %s in namespace %s for API %s", name, ns, api))
 }
 
-func (c *Controller) generate(ns, name, api string) (*v1.Service, *v1.Endpoints, error) {
+func (c *Controller) generate(ns, name, api string) (*v1.Service, *v1.Endpoints, *v1.Namespace, error) {
 	obj, exists, err := c.informers[api].service.GetStore().GetByKey(ns + "/" + name)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get Service %s in namespace %s from API %s", name, ns, api)
+		return nil, nil, nil, fmt.Errorf("failed to get Service %s in namespace %s from API %s", name, ns, api)
 	}
 	// We just verified that the object exists and that there is no error, so this
 	// should never occur.
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to find Service: %v", err)
+		return nil, nil, nil, fmt.Errorf("failed to find Service: %v", err)
 	}
 	if !exists {
-		return nil, nil, errors.New("the specified Service does not exist")
+		return nil, nil, nil, errors.New("the specified Service does not exist")
 	}
 	sremote := obj.(*v1.Service)
+
+	namespace := &v1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: ns,
+			Labels: map[string]string{
+				reflectedLabelKey: "true",
+			},
+		},
+	}
 
 	svc := &v1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -390,16 +425,16 @@ func (c *Controller) generate(ns, name, api string) (*v1.Service, *v1.Endpoints,
 
 	// ExternalName Services are easy.
 	if svc.Spec.Type == v1.ServiceTypeExternalName {
-		return svc, nil, nil
+		return svc, nil, namespace, nil
 	}
 
 	// For consistency, always try to dereference the Endpoints.
 	obj, exists, err = c.informers[api].endpoints.GetStore().GetByKey(ns + "/" + name)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get Endpoints %s in namespace %s from API %s", name, ns, api)
+		return nil, nil, nil, fmt.Errorf("failed to get Endpoints %s in namespace %s from API %s", name, ns, api)
 	}
 	if !exists {
-		return nil, nil, fmt.Errorf("could not find matching Endpoints for Service %s in namespace %s", name, ns)
+		return nil, nil, nil, fmt.Errorf("could not find matching Endpoints for Service %s in namespace %s", name, ns)
 	}
 	eremote := obj.(*v1.Endpoints)
 
@@ -427,7 +462,7 @@ func (c *Controller) generate(ns, name, api string) (*v1.Service, *v1.Endpoints,
 		end.Subsets = append(end.Subsets, s)
 	}
 
-	return svc, end, nil
+	return svc, end, namespace, nil
 }
 
 // endpointsEquivalent ensures that b has all of the important
@@ -462,7 +497,7 @@ func (c *Controller) servicesEquivalent(a, b *v1.Service) bool {
 // parameters against the local API.
 func (c *Controller) deleteLocal(ns, name, api string) error {
 	// First try to delete the Service.
-	obj, exists, err := c.localInformers.service.GetStore().GetByKey(ns + "/" + name)
+	obj, exists, err := c.localInformers.service.Informer().GetStore().GetByKey(ns + "/" + name)
 	if err != nil {
 		return fmt.Errorf("failed to get Service %s in namespace %s for API %s locally", name, ns, api)
 	}
@@ -476,12 +511,33 @@ func (c *Controller) deleteLocal(ns, name, api string) error {
 		level.Info(c.logger).Log("msg", "refusing to delete Service that is not managed by this controller", "name", name, "namespace", ns)
 		return nil
 	}
+	// Check if we can delete the namespace entirely.
+	obj, exists, err = c.localInformers.namespace.Informer().GetStore().GetByKey(ns)
+	if !exists {
+		return fmt.Errorf("expected to find namespace %s", ns)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to get namespace: %s locally", ns)
+	}
+	nslocal := obj.(*v1.Namespace)
+	if v := nslocal.Labels[reflectedLabelKey]; v == "true" {
+		ss, err := c.localInformers.service.Lister().Services(ns).List(labels.Everything())
+		if err != nil {
+			return fmt.Errorf("failed to list Services in namespace %s: %v", ns, err)
+		}
+		// We are going to delete the whole namespace
+		// so we don't need to delete anything else.
+		if len(ss) == 0 || len(ss) == 1 && ss[0].Name == name {
+			return c.client.CoreV1().Namespaces().Delete(ns, &metav1.DeleteOptions{})
+		}
+	}
+	// Try to delete the Service.
 	err = c.client.CoreV1().Services(ns).Delete(name, &metav1.DeleteOptions{})
 	if err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("failed to delete Service %s in namespace %s for API %s", name, ns, api)
 	}
 	// Next try to delete the Endpoints.
-	obj, exists, err = c.localInformers.endpoints.GetStore().GetByKey(ns + "/" + name)
+	obj, exists, err = c.localInformers.endpoints.Informer().GetStore().GetByKey(ns + "/" + name)
 	if err != nil {
 		return fmt.Errorf("failed to get Endpounts %s in namespace %s for API %s locally", name, ns, api)
 	}
