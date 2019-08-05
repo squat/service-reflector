@@ -28,6 +28,12 @@ import (
 
 type event func(t *testing.T, clients map[string]kubernetes.Interface)
 
+func delay(d time.Duration) event {
+	return func(_ *testing.T, _ map[string]kubernetes.Interface) {
+		<-time.After(d)
+	}
+}
+
 func createEvent(api string, obj metav1.Object) event {
 	return func(t *testing.T, clients map[string]kubernetes.Interface) {
 		client := clients[api]
@@ -530,6 +536,7 @@ func TestController(t *testing.T) {
 						},
 					},
 				}),
+				delay(100 * time.Millisecond),
 				createEvent("bar", &v1.Service{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "foo",
