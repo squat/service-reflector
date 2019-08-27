@@ -362,7 +362,7 @@ func Main() error {
 			if err != nil {
 				return fmt.Errorf("failed to create Kubernetes config: %v", err)
 			}
-			clients[i] = &controller.NamedClient{Name: config.Host, Client: kubernetes.NewForConfigOrDie(config)}
+			clients[i+len(o.apis)] = &controller.NamedClient{Name: config.Host, Client: kubernetes.NewForConfigOrDie(config)}
 		}
 		c := controller.New(o.client, o.factory, clients, o.namespace, o.reflectorSelectorRaw, log.With(o.logger, "component", "controller"))
 		c.RegisterMetrics(r)
