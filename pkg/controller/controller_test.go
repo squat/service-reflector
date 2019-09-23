@@ -137,9 +137,9 @@ func TestController(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "foo",
 						Namespace: "bar",
-						Labels: map[string]string{
-							reflectedLabelKey: "true",
-							sourceLabelKey:    "foo",
+						Annotations: map[string]string{
+							reflectedAnnotationKey: "true",
+							sourceAnnotationKey:    "foo",
 						},
 					},
 					Spec: v1.ServiceSpec{
@@ -154,9 +154,9 @@ func TestController(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "foo",
 						Namespace: "bar",
-						Labels: map[string]string{
-							reflectedLabelKey: "true",
-							sourceLabelKey:    "foo",
+						Annotations: map[string]string{
+							reflectedAnnotationKey: "true",
+							sourceAnnotationKey:    "foo",
 						},
 					},
 					Subsets: []v1.EndpointSubset{
@@ -177,8 +177,8 @@ func TestController(t *testing.T) {
 				&v1.Namespace{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "bar",
-						Labels: map[string]string{
-							reflectedLabelKey: "true",
+						Annotations: map[string]string{
+							reflectedAnnotationKey: "true",
 						},
 					},
 				},
@@ -297,9 +297,11 @@ func TestController(t *testing.T) {
 						Name:      "foo",
 						Namespace: "bar",
 						Labels: map[string]string{
-							"foo":             "bar",
-							reflectedLabelKey: "true",
-							sourceLabelKey:    "foo",
+							"foo": "bar",
+						},
+						Annotations: map[string]string{
+							reflectedAnnotationKey: "true",
+							sourceAnnotationKey:    "foo",
 						},
 					},
 					Spec: v1.ServiceSpec{
@@ -315,9 +317,11 @@ func TestController(t *testing.T) {
 						Name:      "foo",
 						Namespace: "bar",
 						Labels: map[string]string{
-							"foo":             "bar",
-							reflectedLabelKey: "true",
-							sourceLabelKey:    "foo",
+							"foo": "bar",
+						},
+						Annotations: map[string]string{
+							reflectedAnnotationKey: "true",
+							sourceAnnotationKey:    "foo",
 						},
 					},
 					Subsets: []v1.EndpointSubset{
@@ -338,8 +342,8 @@ func TestController(t *testing.T) {
 				&v1.Namespace{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "bar",
-						Labels: map[string]string{
-							reflectedLabelKey: "true",
+						Annotations: map[string]string{
+							reflectedAnnotationKey: "true",
 						},
 					},
 				},
@@ -466,9 +470,9 @@ func TestController(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "foo",
 						Namespace: "bar",
-						Labels: map[string]string{
-							reflectedLabelKey: "true",
-							sourceLabelKey:    "foo",
+						Annotations: map[string]string{
+							reflectedAnnotationKey: "true",
+							sourceAnnotationKey:    "foo",
 						},
 					},
 					Spec: v1.ServiceSpec{
@@ -483,8 +487,8 @@ func TestController(t *testing.T) {
 				&v1.Namespace{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "bar",
-						Labels: map[string]string{
-							reflectedLabelKey: "true",
+						Annotations: map[string]string{
+							reflectedAnnotationKey: "true",
 						},
 					},
 				},
@@ -576,9 +580,9 @@ func TestController(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "foo",
 						Namespace: "bar",
-						Labels: map[string]string{
-							reflectedLabelKey: "true",
-							sourceLabelKey:    "foo",
+						Annotations: map[string]string{
+							reflectedAnnotationKey: "true",
+							sourceAnnotationKey:    "foo",
 						},
 					},
 					Spec: v1.ServiceSpec{
@@ -593,9 +597,9 @@ func TestController(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "foo",
 						Namespace: "bar",
-						Labels: map[string]string{
-							reflectedLabelKey: "true",
-							sourceLabelKey:    "foo",
+						Annotations: map[string]string{
+							reflectedAnnotationKey: "true",
+							sourceAnnotationKey:    "foo",
 						},
 					},
 					Subsets: []v1.EndpointSubset{
@@ -616,8 +620,8 @@ func TestController(t *testing.T) {
 				&v1.Namespace{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "bar",
-						Labels: map[string]string{
-							reflectedLabelKey: "true",
+						Annotations: map[string]string{
+							reflectedAnnotationKey: "true",
 						},
 					},
 				},
@@ -717,9 +721,9 @@ func TestController(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "bar",
 						Namespace: "bar",
-						Labels: map[string]string{
-							reflectedLabelKey: "true",
-							sourceLabelKey:    "foo",
+						Annotations: map[string]string{
+							reflectedAnnotationKey: "true",
+							sourceAnnotationKey:    "foo",
 						},
 					},
 					Spec: v1.ServiceSpec{
@@ -734,9 +738,9 @@ func TestController(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "bar",
 						Namespace: "bar",
-						Labels: map[string]string{
-							reflectedLabelKey: "true",
-							sourceLabelKey:    "foo",
+						Annotations: map[string]string{
+							reflectedAnnotationKey: "true",
+							sourceAnnotationKey:    "foo",
 						},
 					},
 					Subsets: []v1.EndpointSubset{
@@ -757,8 +761,8 @@ func TestController(t *testing.T) {
 				&v1.Namespace{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "bar",
-						Labels: map[string]string{
-							reflectedLabelKey: "true",
+						Annotations: map[string]string{
+							reflectedAnnotationKey: "true",
 						},
 					},
 				},

@@ -38,9 +38,9 @@ import (
 )
 
 const (
-	resyncPeriod      = 5 * time.Minute
-	reflectedLabelKey = "service-reflector.squat.ai/reflected"
-	sourceLabelKey    = "service-reflector.squat.ai/source"
+	resyncPeriod           = 5 * time.Minute
+	reflectedAnnotationKey = "service-reflector.squat.ai/reflected"
+	sourceAnnotationKey    = "service-reflector.squat.ai/source"
 )
 
 type informerPair struct {
@@ -225,13 +225,13 @@ func (c *Controller) handleEvent(api string) func(interface{}) {
 	return func(obj interface{}) {
 		if api == "" {
 			mo := obj.(metav1.Object)
-			if v, ok := mo.GetLabels()[reflectedLabelKey]; !ok || v != "true" {
+			if v, ok := mo.GetAnnotations()[reflectedAnnotationKey]; !ok || v != "true" {
 				level.Debug(c.logger).Log("msg", "ignoring service that is not managed by this controller", "name", mo.GetName(), "namespace", mo.GetNamespace())
 				return
 			}
-			source, ok := mo.GetLabels()[sourceLabelKey]
+			source, ok := mo.GetAnnotations()[sourceAnnotationKey]
 			if !ok {
-				level.Warn(c.logger).Log("msg", "service is managed by this controller but has no source label; skipping", "name", mo.GetName(), "namespace", mo.GetNamespace())
+				level.Warn(c.logger).Log("msg", "service is managed by this controller but has no source annotation; skipping", "name", mo.GetName(), "namespace", mo.GetNamespace())
 				return
 			}
 			api = source
@@ -327,11 +327,11 @@ func (c *Controller) sync(key string) error {
 	}
 	if exists {
 		local := obj.(*v1.Service)
-		if v, ok := local.Labels[reflectedLabelKey]; !ok || v != "true" {
+		if v, ok := local.Annotations[reflectedAnnotationKey]; !ok || v != "true" {
 			level.Info(logger).Log("msg", "refusing to overwrite Service that is not managed by this controller", "name", name, "namespace", ns)
 			return nil
 		}
-		if v, ok := local.Labels[sourceLabelKey]; ok && v != api {
+		if v, ok := local.Annotations[sourceAnnotationKey]; ok && v != api {
 			level.Info(logger).Log("msg", "refusing to overwrite Service that is reflected from another API", "name", name, "namespace", ns)
 			return nil
 		}
@@ -366,7 +366,7 @@ func (c *Controller) sync(key string) error {
 
 	if exists {
 		local := obj.(*v1.Endpoints)
-		if v, ok := local.Labels[reflectedLabelKey]; !ok || v != "true" {
+		if v, ok := local.Annotations[reflectedAnnotationKey]; !ok || v != "true" {
 			level.Info(logger).Log("msg", "refusing to overwrite Endpoints that is not managed by this controller", "name", name, "namespace", ns)
 			return nil
 		}
@@ -399,17 +399,18 @@ func (c *Controller) generate(ns, name, api string) (*v1.Service, *v1.Endpoints,
 	namespace := &v1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: ns,
-			Labels: map[string]string{
-				reflectedLabelKey: "true",
+			Annotations: map[string]string{
+				reflectedAnnotationKey: "true",
 			},
 		},
 	}
 
 	svc := &v1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: ns,
-			Labels:    copyLabels(sremote.Labels),
+			Name:        name,
+			Namespace:   ns,
+			Annotations: copyAnnotations(sremote.Annotations),
+			Labels:      sremote.Labels,
 		},
 		Spec: v1.ServiceSpec{
 			ExternalName: sremote.Spec.ExternalName,
@@ -417,8 +418,8 @@ func (c *Controller) generate(ns, name, api string) (*v1.Service, *v1.Endpoints,
 			Ports:        sremote.Spec.Ports,
 		},
 	}
-	svc.Labels[reflectedLabelKey] = "true"
-	svc.Labels[sourceLabelKey] = api
+	svc.Annotations[reflectedAnnotationKey] = "true"
+	svc.Annotations[sourceAnnotationKey] = api
 	if sremote.Spec.ClusterIP == "None" {
 		svc.Spec.ClusterIP = "None"
 	}
@@ -440,13 +441,14 @@ func (c *Controller) generate(ns, name, api string) (*v1.Service, *v1.Endpoints,
 
 	end := &v1.Endpoints{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: ns,
-			Labels:    copyLabels(eremote.Labels),
+			Name:        name,
+			Namespace:   ns,
+			Annotations: copyAnnotations(eremote.Annotations),
+			Labels:      eremote.Labels,
 		},
 	}
-	end.Labels[reflectedLabelKey] = "true"
-	end.Labels[sourceLabelKey] = api
+	end.Annotations[reflectedAnnotationKey] = "true"
+	end.Annotations[sourceAnnotationKey] = api
 	for i := range eremote.Subsets {
 		if len(eremote.Subsets[i].Addresses) == 0 {
 			continue
@@ -471,8 +473,8 @@ func (c *Controller) endpointsEquivalent(a, b *v1.Endpoints) bool {
 	if (a != nil) != (b != nil) {
 		return false
 	}
-	for k := range a.Labels {
-		if a.Labels[k] != b.Labels[k] {
+	for k := range a.Annotations {
+		if a.Annotations[k] != b.Annotations[k] {
 			return false
 		}
 	}
@@ -485,8 +487,8 @@ func (c *Controller) servicesEquivalent(a, b *v1.Service) bool {
 	if (a != nil) != (b != nil) {
 		return false
 	}
-	for k := range a.Labels {
-		if a.Labels[k] != b.Labels[k] {
+	for k := range a.Annotations {
+		if a.Annotations[k] != b.Annotations[k] {
 			return false
 		}
 	}
@@ -507,7 +509,7 @@ func (c *Controller) deleteLocal(ns, name, api string) error {
 		return nil
 	}
 	slocal := obj.(*v1.Service)
-	if v, ok := slocal.Labels[reflectedLabelKey]; !ok || v != "true" {
+	if v, ok := slocal.Annotations[reflectedAnnotationKey]; !ok || v != "true" {
 		level.Info(c.logger).Log("msg", "refusing to delete Service that is not managed by this controller", "name", name, "namespace", ns)
 		return nil
 	}
@@ -520,7 +522,7 @@ func (c *Controller) deleteLocal(ns, name, api string) error {
 		return fmt.Errorf("failed to get namespace: %s locally", ns)
 	}
 	nslocal := obj.(*v1.Namespace)
-	if v := nslocal.Labels[reflectedLabelKey]; v == "true" {
+	if v := nslocal.Annotations[reflectedAnnotationKey]; v == "true" {
 		ss, err := c.localInformers.service.Lister().Services(ns).List(labels.Everything())
 		if err != nil {
 			return fmt.Errorf("failed to list Services in namespace %s: %v", ns, err)
@@ -547,7 +549,7 @@ func (c *Controller) deleteLocal(ns, name, api string) error {
 		return nil
 	}
 	elocal := obj.(*v1.Endpoints)
-	if v, ok := elocal.Labels[reflectedLabelKey]; !ok || v != "true" {
+	if v, ok := elocal.Annotations[reflectedAnnotationKey]; !ok || v != "true" {
 		level.Info(c.logger).Log("msg", "refusing to delete Endpoints that is not managed by this controller", "name", name, "namespace", ns)
 		return nil
 	}
@@ -558,10 +560,10 @@ func (c *Controller) deleteLocal(ns, name, api string) error {
 	return nil
 }
 
-func copyLabels(labels map[string]string) map[string]string {
-	l := make(map[string]string)
-	for k, v := range labels {
-		l[k] = v
+func copyAnnotations(annotations map[string]string) map[string]string {
+	a := make(map[string]string)
+	for k, v := range annotations {
+		a[k] = v
 	}
-	return l
+	return a
 }
