@@ -30,3 +30,5 @@ require (
 	k8s.io/code-generator v0.0.0-20190717022600-77f3a1fe56bb
 	k8s.io/kube-openapi v0.0.0-20190709113604-33be087ad058
 )
+
+go 1.13
