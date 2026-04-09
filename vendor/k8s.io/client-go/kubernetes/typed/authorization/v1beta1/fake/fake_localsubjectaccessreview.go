@@ -18,8 +18,27 @@ limitations under the License.
 
 package fake
 
-// FakeLocalSubjectAccessReviews implements LocalSubjectAccessReviewInterface
-type FakeLocalSubjectAccessReviews struct {
+import (
+	v1beta1 "k8s.io/api/authorization/v1beta1"
+	gentype "k8s.io/client-go/gentype"
+	authorizationv1beta1 "k8s.io/client-go/kubernetes/typed/authorization/v1beta1"
+)
+
+// fakeLocalSubjectAccessReviews implements LocalSubjectAccessReviewInterface
+type fakeLocalSubjectAccessReviews struct {
+	*gentype.FakeClient[*v1beta1.LocalSubjectAccessReview]
 	Fake *FakeAuthorizationV1beta1
-	ns   string
+}
+
+func newFakeLocalSubjectAccessReviews(fake *FakeAuthorizationV1beta1, namespace string) authorizationv1beta1.LocalSubjectAccessReviewInterface {
+	return &fakeLocalSubjectAccessReviews{
+		gentype.NewFakeClient[*v1beta1.LocalSubjectAccessReview](
+			fake.Fake,
+			namespace,
+			v1beta1.SchemeGroupVersion.WithResource("localsubjectaccessreviews"),
+			v1beta1.SchemeGroupVersion.WithKind("LocalSubjectAccessReview"),
+			func() *v1beta1.LocalSubjectAccessReview { return &v1beta1.LocalSubjectAccessReview{} },
+		),
+		fake,
+	}
 }

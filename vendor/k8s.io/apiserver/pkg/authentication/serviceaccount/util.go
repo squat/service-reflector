@@ -20,7 +20,9 @@ import (
 	"fmt"
 	"strings"
 
+	v1 "k8s.io/api/core/v1"
 	apimachineryvalidation "k8s.io/apimachinery/pkg/api/validation"
+	"k8s.io/apiserver/pkg/authentication/user"
 )
 
 const (
@@ -28,6 +30,24 @@ const (
 	ServiceAccountUsernameSeparator = ":"
 	ServiceAccountGroupPrefix       = "system:serviceaccounts:"
 	AllServiceAccountsGroup         = "system:serviceaccounts"
+	// IssuedCredentialIDAuditAnnotationKey is the annotation key used in the audit event that is persisted to the
+	// '/token' endpoint for service accounts.
+	// This annotation indicates the generated credential identifier for the service account token being issued.
+	// This is useful when tracing back the origin of tokens that have gone on to make request that have persisted
+	// their credential-identifier into the audit log via the user's extra info stored on subsequent audit events.
+	IssuedCredentialIDAuditAnnotationKey = "authentication.kubernetes.io/issued-credential-id"
+	// PodNameKey is the key used in a user's "extra" to specify the pod name of
+	// the authenticating request.
+	PodNameKey = "authentication.kubernetes.io/pod-name"
+	// PodUIDKey is the key used in a user's "extra" to specify the pod UID of
+	// the authenticating request.
+	PodUIDKey = "authentication.kubernetes.io/pod-uid"
+	// NodeNameKey is the key used in a user's "extra" to specify the node name of
+	// the authenticating request.
+	NodeNameKey = "authentication.kubernetes.io/node-name"
+	// NodeUIDKey is the key used in a user's "extra" to specify the node UID of
+	// the authenticating request.
+	NodeUIDKey = "authentication.kubernetes.io/node-uid"
 )
 
 // MakeUsername generates a username from the given namespace and ServiceAccount name.
@@ -91,4 +111,74 @@ func MakeGroupNames(namespace string) []string {
 // MakeNamespaceGroupName returns the name of the group all service accounts in the namespace are included in
 func MakeNamespaceGroupName(namespace string) string {
 	return ServiceAccountGroupPrefix + namespace
+}
+
+// UserInfo returns a user.Info interface for the given namespace, service account name and UID
+func UserInfo(namespace, name, uid string) user.Info {
+	return (&ServiceAccountInfo{
+		Name:      name,
+		Namespace: namespace,
+		UID:       uid,
+	}).UserInfo()
+}
+
+type ServiceAccountInfo struct {
+	Name, Namespace, UID string
+	PodName, PodUID      string
+	CredentialID         string
+	NodeName, NodeUID    string
+}
+
+func (sa *ServiceAccountInfo) UserInfo() user.Info {
+	info := &user.DefaultInfo{
+		Name:   MakeUsername(sa.Namespace, sa.Name),
+		UID:    sa.UID,
+		Groups: MakeGroupNames(sa.Namespace),
+	}
+
+	if sa.PodName != "" && sa.PodUID != "" {
+		if info.Extra == nil {
+			info.Extra = make(map[string][]string)
+		}
+		info.Extra[PodNameKey] = []string{sa.PodName}
+		info.Extra[PodUIDKey] = []string{sa.PodUID}
+	}
+	if sa.CredentialID != "" {
+		if info.Extra == nil {
+			info.Extra = make(map[string][]string)
+		}
+		info.Extra[user.CredentialIDKey] = []string{sa.CredentialID}
+	}
+	if sa.NodeName != "" {
+		if info.Extra == nil {
+			info.Extra = make(map[string][]string)
+		}
+		info.Extra[NodeNameKey] = []string{sa.NodeName}
+		// node UID is optional and will only be set if the node name is set
+		if sa.NodeUID != "" {
+			info.Extra[NodeUIDKey] = []string{sa.NodeUID}
+		}
+	}
+
+	return info
+}
+
+// IsServiceAccountToken returns true if the secret is a valid api token for the service account
+func IsServiceAccountToken(secret *v1.Secret, sa *v1.ServiceAccount) bool {
+	if secret.Type != v1.SecretTypeServiceAccountToken {
+		return false
+	}
+
+	name := secret.Annotations[v1.ServiceAccountNameKey]
+	uid := secret.Annotations[v1.ServiceAccountUIDKey]
+	if name != sa.Name {
+		// Name must match
+		return false
+	}
+	if len(uid) > 0 && uid != string(sa.UID) {
+		// If UID is specified, it must match
+		return false
+	}
+
+	return true
 }

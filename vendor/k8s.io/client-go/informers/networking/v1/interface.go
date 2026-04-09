@@ -24,8 +24,16 @@ import (
 
 // Interface provides access to all the informers in this group version.
 type Interface interface {
+	// IPAddresses returns a IPAddressInformer.
+	IPAddresses() IPAddressInformer
+	// Ingresses returns a IngressInformer.
+	Ingresses() IngressInformer
+	// IngressClasses returns a IngressClassInformer.
+	IngressClasses() IngressClassInformer
 	// NetworkPolicies returns a NetworkPolicyInformer.
 	NetworkPolicies() NetworkPolicyInformer
+	// ServiceCIDRs returns a ServiceCIDRInformer.
+	ServiceCIDRs() ServiceCIDRInformer
 }
 
 type version struct {
@@ -39,7 +47,27 @@ func New(f internalinterfaces.SharedInformerFactory, namespace string, tweakList
 	return &version{factory: f, namespace: namespace, tweakListOptions: tweakListOptions}
 }
 
+// IPAddresses returns a IPAddressInformer.
+func (v *version) IPAddresses() IPAddressInformer {
+	return &iPAddressInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
+}
+
+// Ingresses returns a IngressInformer.
+func (v *version) Ingresses() IngressInformer {
+	return &ingressInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
+}
+
+// IngressClasses returns a IngressClassInformer.
+func (v *version) IngressClasses() IngressClassInformer {
+	return &ingressClassInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
+}
+
 // NetworkPolicies returns a NetworkPolicyInformer.
 func (v *version) NetworkPolicies() NetworkPolicyInformer {
 	return &networkPolicyInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
+}
+
+// ServiceCIDRs returns a ServiceCIDRInformer.
+func (v *version) ServiceCIDRs() ServiceCIDRInformer {
+	return &serviceCIDRInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
 }

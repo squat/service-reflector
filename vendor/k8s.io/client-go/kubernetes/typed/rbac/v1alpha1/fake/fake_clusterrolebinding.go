@@ -20,101 +20,34 @@ package fake
 
 import (
 	v1alpha1 "k8s.io/api/rbac/v1alpha1"
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	labels "k8s.io/apimachinery/pkg/labels"
-	schema "k8s.io/apimachinery/pkg/runtime/schema"
-	types "k8s.io/apimachinery/pkg/types"
-	watch "k8s.io/apimachinery/pkg/watch"
-	testing "k8s.io/client-go/testing"
+	rbacv1alpha1 "k8s.io/client-go/applyconfigurations/rbac/v1alpha1"
+	gentype "k8s.io/client-go/gentype"
+	typedrbacv1alpha1 "k8s.io/client-go/kubernetes/typed/rbac/v1alpha1"
 )
 
-// FakeClusterRoleBindings implements ClusterRoleBindingInterface
-type FakeClusterRoleBindings struct {
+// fakeClusterRoleBindings implements ClusterRoleBindingInterface
+type fakeClusterRoleBindings struct {
+	*gentype.FakeClientWithListAndApply[*v1alpha1.ClusterRoleBinding, *v1alpha1.ClusterRoleBindingList, *rbacv1alpha1.ClusterRoleBindingApplyConfiguration]
 	Fake *FakeRbacV1alpha1
 }
 
-var clusterrolebindingsResource = schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Version: "v1alpha1", Resource: "clusterrolebindings"}
-
-var clusterrolebindingsKind = schema.GroupVersionKind{Group: "rbac.authorization.k8s.io", Version: "v1alpha1", Kind: "ClusterRoleBinding"}
-
-// Get takes name of the clusterRoleBinding, and returns the corresponding clusterRoleBinding object, and an error if there is any.
-func (c *FakeClusterRoleBindings) Get(name string, options v1.GetOptions) (result *v1alpha1.ClusterRoleBinding, err error) {
-	obj, err := c.Fake.
-		Invokes(testing.NewRootGetAction(clusterrolebindingsResource, name), &v1alpha1.ClusterRoleBinding{})
-	if obj == nil {
-		return nil, err
+func newFakeClusterRoleBindings(fake *FakeRbacV1alpha1) typedrbacv1alpha1.ClusterRoleBindingInterface {
+	return &fakeClusterRoleBindings{
+		gentype.NewFakeClientWithListAndApply[*v1alpha1.ClusterRoleBinding, *v1alpha1.ClusterRoleBindingList, *rbacv1alpha1.ClusterRoleBindingApplyConfiguration](
+			fake.Fake,
+			"",
+			v1alpha1.SchemeGroupVersion.WithResource("clusterrolebindings"),
+			v1alpha1.SchemeGroupVersion.WithKind("ClusterRoleBinding"),
+			func() *v1alpha1.ClusterRoleBinding { return &v1alpha1.ClusterRoleBinding{} },
+			func() *v1alpha1.ClusterRoleBindingList { return &v1alpha1.ClusterRoleBindingList{} },
+			func(dst, src *v1alpha1.ClusterRoleBindingList) { dst.ListMeta = src.ListMeta },
+			func(list *v1alpha1.ClusterRoleBindingList) []*v1alpha1.ClusterRoleBinding {
+				return gentype.ToPointerSlice(list.Items)
+			},
+			func(list *v1alpha1.ClusterRoleBindingList, items []*v1alpha1.ClusterRoleBinding) {
+				list.Items = gentype.FromPointerSlice(items)
+			},
+		),
+		fake,
 	}
-	return obj.(*v1alpha1.ClusterRoleBinding), err
-}
-
-// List takes label and field selectors, and returns the list of ClusterRoleBindings that match those selectors.
-func (c *FakeClusterRoleBindings) List(opts v1.ListOptions) (result *v1alpha1.ClusterRoleBindingList, err error) {
-	obj, err := c.Fake.
-		Invokes(testing.NewRootListAction(clusterrolebindingsResource, clusterrolebindingsKind, opts), &v1alpha1.ClusterRoleBindingList{})
-	if obj == nil {
-		return nil, err
-	}
-
-	label, _, _ := testing.ExtractFromListOptions(opts)
-	if label == nil {
-		label = labels.Everything()
-	}
-	list := &v1alpha1.ClusterRoleBindingList{ListMeta: obj.(*v1alpha1.ClusterRoleBindingList).ListMeta}
-	for _, item := range obj.(*v1alpha1.ClusterRoleBindingList).Items {
-		if label.Matches(labels.Set(item.Labels)) {
-			list.Items = append(list.Items, item)
-		}
-	}
-	return list, err
-}
-
-// Watch returns a watch.Interface that watches the requested clusterRoleBindings.
-func (c *FakeClusterRoleBindings) Watch(opts v1.ListOptions) (watch.Interface, error) {
-	return c.Fake.
-		InvokesWatch(testing.NewRootWatchAction(clusterrolebindingsResource, opts))
-}
-
-// Create takes the representation of a clusterRoleBinding and creates it.  Returns the server's representation of the clusterRoleBinding, and an error, if there is any.
-func (c *FakeClusterRoleBindings) Create(clusterRoleBinding *v1alpha1.ClusterRoleBinding) (result *v1alpha1.ClusterRoleBinding, err error) {
-	obj, err := c.Fake.
-		Invokes(testing.NewRootCreateAction(clusterrolebindingsResource, clusterRoleBinding), &v1alpha1.ClusterRoleBinding{})
-	if obj == nil {
-		return nil, err
-	}
-	return obj.(*v1alpha1.ClusterRoleBinding), err
-}
-
-// Update takes the representation of a clusterRoleBinding and updates it. Returns the server's representation of the clusterRoleBinding, and an error, if there is any.
-func (c *FakeClusterRoleBindings) Update(clusterRoleBinding *v1alpha1.ClusterRoleBinding) (result *v1alpha1.ClusterRoleBinding, err error) {
-	obj, err := c.Fake.
-		Invokes(testing.NewRootUpdateAction(clusterrolebindingsResource, clusterRoleBinding), &v1alpha1.ClusterRoleBinding{})
-	if obj == nil {
-		return nil, err
-	}
-	return obj.(*v1alpha1.ClusterRoleBinding), err
-}
-
-// Delete takes name of the clusterRoleBinding and deletes it. Returns an error if one occurs.
-func (c *FakeClusterRoleBindings) Delete(name string, options *v1.DeleteOptions) error {
-	_, err := c.Fake.
-		Invokes(testing.NewRootDeleteAction(clusterrolebindingsResource, name), &v1alpha1.ClusterRoleBinding{})
-	return err
-}
-
-// DeleteCollection deletes a collection of objects.
-func (c *FakeClusterRoleBindings) DeleteCollection(options *v1.DeleteOptions, listOptions v1.ListOptions) error {
-	action := testing.NewRootDeleteCollectionAction(clusterrolebindingsResource, listOptions)
-
-	_, err := c.Fake.Invokes(action, &v1alpha1.ClusterRoleBindingList{})
-	return err
-}
-
-// Patch applies the patch and returns the patched clusterRoleBinding.
-func (c *FakeClusterRoleBindings) Patch(name string, pt types.PatchType, data []byte, subresources ...string) (result *v1alpha1.ClusterRoleBinding, err error) {
-	obj, err := c.Fake.
-		Invokes(testing.NewRootPatchSubresourceAction(clusterrolebindingsResource, name, pt, data, subresources...), &v1alpha1.ClusterRoleBinding{})
-	if obj == nil {
-		return nil, err
-	}
-	return obj.(*v1alpha1.ClusterRoleBinding), err
 }

@@ -1,4 +1,4 @@
-// Copyright 2019 the Service Reflector authors
+// Copyright 2026 the Service Reflector authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,22 +19,22 @@ import (
 	"errors"
 	"sync"
 
-	v1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	metainternalversion "k8s.io/apimachinery/pkg/apis/meta/internalversion"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/watch"
 	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/registry/generic"
 	"k8s.io/apiserver/pkg/registry/rest"
-	coreinformers "k8s.io/client-go/informers/core/v1"
 	"k8s.io/client-go/tools/cache"
+	v1beta1 "sigs.k8s.io/mcs-api/pkg/apis/v1beta1"
 )
 
-// EmitterStorage implements the interfaces needed for
-// emission, namely lister and watcher.
+// EmitterStorage is the interface implemented by both storage types.
 type EmitterStorage interface {
 	rest.Storage
 	rest.Scoper
@@ -44,142 +44,234 @@ type EmitterStorage interface {
 	cache.ResourceEventHandler
 }
 
-type endpointsStorage struct {
-	coreinformers.EndpointsInformer
-	selector labels.Selector
+// -----------------------------------------------------------------------
+// ServiceExportStorage
+// -----------------------------------------------------------------------
+
+type serviceExportStorage struct {
+	rest.TableConvertor
+	informer cache.SharedIndexInformer
 	sync.Mutex
 	ws []*watcher
 }
 
-// NewEndpointsStorage creates a new EmitterStorage for Endpoints.
-func NewEndpointsStorage(informer coreinformers.EndpointsInformer, selector labels.Selector) EmitterStorage {
-	return &endpointsStorage{EndpointsInformer: informer, selector: selector}
+// NewServiceExportStorage creates a new EmitterStorage backed by a
+// ServiceExport informer.
+func NewServiceExportStorage(informer cache.SharedIndexInformer) EmitterStorage {
+	return &serviceExportStorage{
+		TableConvertor: rest.NewDefaultTableConvertor(schema.GroupResource{
+			Group:    v1beta1.GroupName,
+			Resource: "serviceexports",
+		}),
+		informer: informer,
+	}
 }
 
-func (s *endpointsStorage) New() runtime.Object {
-	return &v1.Endpoints{}
+func (s *serviceExportStorage) New() runtime.Object {
+	return &v1beta1.ServiceExport{}
 }
 
-func (s *endpointsStorage) Kind() string {
-	return "Endpoints"
+func (s *serviceExportStorage) Destroy() {}
+
+func (s *serviceExportStorage) Kind() string { return "ServiceExport" }
+
+func (s *serviceExportStorage) NamespaceScoped() bool { return true }
+
+func (s *serviceExportStorage) NewList() runtime.Object {
+	return &v1beta1.ServiceExportList{}
 }
 
-func (s *endpointsStorage) NamespaceScoped() bool {
-	return true
-}
-func (s *endpointsStorage) NewList() runtime.Object {
-	return &v1.EndpointsList{}
-}
-
-func (s *endpointsStorage) List(ctx context.Context, options *metainternalversion.ListOptions) (runtime.Object, error) {
-	if !s.Informer().HasSynced() {
+func (s *serviceExportStorage) List(ctx context.Context, options *metainternalversion.ListOptions) (runtime.Object, error) {
+	if !s.informer.HasSynced() {
 		return nil, errors.New("backend is not ready")
 	}
-	el := &v1.EndpointsList{}
-	es, err := s.Lister().List(mergeSelectors(s.selector, options))
-	if err != nil {
-		return el, err
-	}
+	ls := mergeSelectors(labels.Everything(), options)
 	fs := defaultFieldSelector(options)
-	for _, end := range es {
-		if !fs.Matches(generic.ObjectMetaFieldsSet(&end.ObjectMeta, true)) {
+	ns := genericapirequest.NamespaceValue(ctx)
+
+	list := &v1beta1.ServiceExportList{}
+	for _, item := range s.informer.GetStore().List() {
+		se := item.(*v1beta1.ServiceExport)
+		if !ls.Matches(labels.Set(se.Labels)) {
 			continue
 		}
-		if !matchNamespace(genericapirequest.NamespaceValue(ctx), &end.ObjectMeta) {
+		if !fs.Matches(generic.ObjectMetaFieldsSet(&se.ObjectMeta, true)) {
 			continue
 		}
-		if end.ResourceVersion < options.ResourceVersion {
+		if !matchNamespace(ns, &se.ObjectMeta) {
 			continue
 		}
-		el.Items = append(el.Items, *end)
+		list.Items = append(list.Items, *se)
 	}
-	return el, nil
+	return list, nil
 }
 
-func (s *endpointsStorage) Watch(ctx context.Context, options *metainternalversion.ListOptions) (watch.Interface, error) {
-	return addWatcher(s, &s.ws, mergeSelectors(s.selector, options), defaultFieldSelector(options), genericapirequest.NamespaceValue(ctx)), nil
+func (s *serviceExportStorage) Watch(ctx context.Context, options *metainternalversion.ListOptions) (watch.Interface, error) {
+	ls := mergeSelectors(labels.Everything(), options)
+	fs := defaultFieldSelector(options)
+	ns := genericapirequest.NamespaceValue(ctx)
+	return addWatcher(s, &s.ws, ls, fs, ns), nil
 }
 
-func (s *endpointsStorage) OnAdd(obj interface{})       { handler(s, s.ws, watch.Added, obj) }
-func (s *endpointsStorage) OnDelete(obj interface{})    { handler(s, s.ws, watch.Deleted, obj) }
-func (s *endpointsStorage) OnUpdate(_, obj interface{}) { handler(s, s.ws, watch.Modified, obj) }
+func (s *serviceExportStorage) OnAdd(obj any, _ bool) {
+	handler(s, s.ws, watch.Added, obj)
+}
+func (s *serviceExportStorage) OnDelete(obj any) {
+	handler(s, s.ws, watch.Deleted, obj)
+}
+func (s *serviceExportStorage) OnUpdate(_, obj any) {
+	handler(s, s.ws, watch.Modified, obj)
+}
 
-type serviceStorage struct {
-	coreinformers.ServiceInformer
-	selector labels.Selector
+// -----------------------------------------------------------------------
+// EndpointSliceStorage
+// -----------------------------------------------------------------------
+
+type endpointSliceStorage struct {
+	rest.TableConvertor
+	sliceInformer  cache.SharedIndexInformer
+	exportInformer cache.SharedIndexInformer
 	sync.Mutex
 	ws []*watcher
 }
 
-// NewServiceStorage creates a new EmitterStorage for Services.
-func NewServiceStorage(informer coreinformers.ServiceInformer, selector labels.Selector) EmitterStorage {
-	return &serviceStorage{ServiceInformer: informer, selector: selector}
+// NewEndpointSliceStorage creates a new EmitterStorage backed by an
+// EndpointSlice informer, filtered to slices that back a service which
+// has a ServiceExport in the same namespace.
+func NewEndpointSliceStorage(sliceInformer, exportInformer cache.SharedIndexInformer) EmitterStorage {
+	return &endpointSliceStorage{
+		TableConvertor: rest.NewDefaultTableConvertor(schema.GroupResource{
+			Group:    discoveryv1.SchemeGroupVersion.Group,
+			Resource: "endpointslices",
+		}),
+		sliceInformer:  sliceInformer,
+		exportInformer: exportInformer,
+	}
 }
 
-func (s *serviceStorage) New() runtime.Object {
-	return &v1.Service{}
+func (s *endpointSliceStorage) New() runtime.Object {
+	return &discoveryv1.EndpointSlice{}
 }
 
-func (s *serviceStorage) Kind() string {
-	return "Service"
+func (s *endpointSliceStorage) Destroy() {}
+
+func (s *endpointSliceStorage) Kind() string { return "EndpointSlice" }
+
+func (s *endpointSliceStorage) NamespaceScoped() bool { return true }
+
+func (s *endpointSliceStorage) NewList() runtime.Object {
+	return &discoveryv1.EndpointSliceList{}
 }
 
-func (s *serviceStorage) NamespaceScoped() bool {
-	return true
-}
-func (s *serviceStorage) NewList() runtime.Object {
-	return &v1.ServiceList{}
-}
-
-func (s *serviceStorage) List(ctx context.Context, options *metainternalversion.ListOptions) (runtime.Object, error) {
-	if !s.Informer().HasSynced() {
+func (s *endpointSliceStorage) List(ctx context.Context, options *metainternalversion.ListOptions) (runtime.Object, error) {
+	if !s.sliceInformer.HasSynced() || !s.exportInformer.HasSynced() {
 		return nil, errors.New("backend is not ready")
 	}
-	sl := &v1.ServiceList{}
-	ss, err := s.Lister().List(mergeSelectors(s.selector, options))
-	if err != nil {
-		return sl, err
-	}
+	ls := mergeSelectors(labels.Everything(), options)
 	fs := defaultFieldSelector(options)
-	for _, svc := range ss {
-		if !fs.Matches(generic.ObjectMetaFieldsSet(&svc.ObjectMeta, true)) {
+	ns := genericapirequest.NamespaceValue(ctx)
+
+	list := &discoveryv1.EndpointSliceList{}
+	for _, item := range s.sliceInformer.GetStore().List() {
+		es := item.(*discoveryv1.EndpointSlice)
+		if !ls.Matches(labels.Set(es.Labels)) {
 			continue
 		}
-		if !matchNamespace(genericapirequest.NamespaceValue(ctx), &svc.ObjectMeta) {
+		if !fs.Matches(generic.ObjectMetaFieldsSet(&es.ObjectMeta, true)) {
 			continue
 		}
-		if svc.ResourceVersion < options.ResourceVersion {
+		if !matchNamespace(ns, &es.ObjectMeta) {
 			continue
 		}
-		sl.Items = append(sl.Items, *svc)
+		if !s.hasExport(es) {
+			continue
+		}
+		list.Items = append(list.Items, *es)
 	}
-	return sl, nil
+	return list, nil
 }
 
-func (s *serviceStorage) Watch(ctx context.Context, options *metainternalversion.ListOptions) (watch.Interface, error) {
-	return addWatcher(s, &s.ws, mergeSelectors(s.selector, options), defaultFieldSelector(options), genericapirequest.NamespaceValue(ctx)), nil
+func (s *endpointSliceStorage) Watch(ctx context.Context, options *metainternalversion.ListOptions) (watch.Interface, error) {
+	ls := mergeSelectors(labels.Everything(), options)
+	fs := defaultFieldSelector(options)
+	ns := genericapirequest.NamespaceValue(ctx)
+	return addWatcher(s, &s.ws, ls, fs, ns), nil
 }
 
-func (s *serviceStorage) OnAdd(obj interface{})       { handler(s, s.ws, watch.Added, obj) }
-func (s *serviceStorage) OnDelete(obj interface{})    { handler(s, s.ws, watch.Deleted, obj) }
-func (s *serviceStorage) OnUpdate(_, obj interface{}) { handler(s, s.ws, watch.Modified, obj) }
+// hasExport returns true if a ServiceExport exists for the service that owns es.
+func (s *endpointSliceStorage) hasExport(es *discoveryv1.EndpointSlice) bool {
+	svcName := es.Labels[discoveryv1.LabelServiceName]
+	if svcName == "" {
+		return false
+	}
+	key := es.Namespace + "/" + svcName
+	_, exists, _ := s.exportInformer.GetStore().GetByKey(key)
+	return exists
+}
 
-func handler(mu sync.Locker, ws []*watcher, et watch.EventType, obj interface{}) {
+func (s *endpointSliceStorage) OnAdd(obj any, _ bool) {
+	es, ok := obj.(*discoveryv1.EndpointSlice)
+	if !ok || !s.hasExport(es) {
+		return
+	}
+	handler(s, s.ws, watch.Added, obj)
+}
+
+func (s *endpointSliceStorage) OnDelete(obj any) {
+	es, ok := obj.(*discoveryv1.EndpointSlice)
+	if !ok {
+		// Tombstone
+		if d, ok2 := obj.(cache.DeletedFinalStateUnknown); ok2 {
+			es, ok = d.Obj.(*discoveryv1.EndpointSlice)
+		}
+	}
+	if !ok || es == nil || !s.hasExport(es) {
+		return
+	}
+	handler(s, s.ws, watch.Deleted, obj)
+}
+
+func (s *endpointSliceStorage) OnUpdate(_, obj any) {
+	es, ok := obj.(*discoveryv1.EndpointSlice)
+	if !ok || !s.hasExport(es) {
+		return
+	}
+	handler(s, s.ws, watch.Modified, obj)
+}
+
+// -----------------------------------------------------------------------
+// Shared helpers
+// -----------------------------------------------------------------------
+
+func handler(mu sync.Locker, ws []*watcher, et watch.EventType, obj any) {
+	mo, ok := obj.(metav1.Object)
+	if !ok {
+		return
+	}
+	ro, ok := obj.(runtime.Object)
+	if !ok {
+		return
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	for _, w := range ws {
-		if !w.ls.Matches(labels.Set(obj.(metav1.Object).GetLabels())) {
-			return
+		if !w.ls.Matches(labels.Set(mo.GetLabels())) {
+			continue
 		}
-		if !w.fs.Matches(generic.ObjectMetaFieldsSet(obj.(*metav1.ObjectMeta), true)) {
-			return
+		objMeta := &metav1.ObjectMeta{
+			Name:      mo.GetName(),
+			Namespace: mo.GetNamespace(),
+			Labels:    mo.GetLabels(),
 		}
-		if !matchNamespace(w.ns, obj.(*metav1.ObjectMeta)) {
-			return
+		if !w.fs.Matches(generic.ObjectMetaFieldsSet(objMeta, true)) {
+			continue
+		}
+		if !matchNamespace(w.ns, objMeta) {
+			continue
 		}
 		nonBlockingSend(w.ch, watch.Event{
 			Type:   et,
-			Object: obj.(runtime.Object),
+			Object: ro,
 		})
 	}
 }
@@ -196,17 +288,17 @@ func addWatcher(mu sync.Locker, ws *[]*watcher, ls labels.Selector, fs fields.Se
 	mu.Lock()
 	i := len(*ws)
 	w := &watcher{
-		ch: make(chan watch.Event),
+		ch: make(chan watch.Event, 100),
 		ls: ls,
 		fs: fs,
 		ns: ns,
-		stop: func() {
-			mu.Lock()
-			defer mu.Unlock()
-			(*ws)[i] = (*ws)[len(*ws)-1]
-			(*ws)[len(*ws)-1] = nil
-			*ws = (*ws)[:len(*ws)-1]
-		},
+	}
+	w.stop = func() {
+		mu.Lock()
+		defer mu.Unlock()
+		(*ws)[i] = (*ws)[len(*ws)-1]
+		(*ws)[len(*ws)-1] = nil
+		*ws = (*ws)[:len(*ws)-1]
 	}
 	*ws = append(*ws, w)
 	mu.Unlock()

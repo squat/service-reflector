@@ -20,16 +20,16 @@ import (
 	"sync"
 	"time"
 
-	"k8s.io/apimachinery/pkg/util/clock"
+	"k8s.io/utils/clock"
 )
 
 // This file provides abstractions for setting the provider (e.g., prometheus)
 // of metrics.
 
-type queueMetrics interface {
-	add(item t)
-	get(item t)
-	done(item t)
+type queueMetrics[T comparable] interface {
+	add(item T)
+	get(item T)
+	done(item T)
 	updateUnfinishedWork()
 }
 
@@ -70,7 +70,7 @@ func (noopMetric) Set(float64)     {}
 func (noopMetric) Observe(float64) {}
 
 // defaultQueueMetrics expects the caller to lock before setting any metrics.
-type defaultQueueMetrics struct {
+type defaultQueueMetrics[T comparable] struct {
 	clock clock.Clock
 
 	// current depth of a workqueue
@@ -81,97 +81,75 @@ type defaultQueueMetrics struct {
 	latency HistogramMetric
 	// how long processing an item from a workqueue takes
 	workDuration         HistogramMetric
-	addTimes             map[t]time.Time
-	processingStartTimes map[t]time.Time
+	addTimes             map[T]time.Time
+	processingStartTimes map[T]time.Time
 
 	// how long have current threads been working?
 	unfinishedWorkSeconds   SettableGaugeMetric
 	longestRunningProcessor SettableGaugeMetric
-
-	// TODO(danielqsj): Remove the following metrics, they are deprecated
-	deprecatedDepth                   GaugeMetric
-	deprecatedAdds                    CounterMetric
-	deprecatedLatency                 SummaryMetric
-	deprecatedWorkDuration            SummaryMetric
-	deprecatedUnfinishedWorkSeconds   SettableGaugeMetric
-	deprecatedLongestRunningProcessor SettableGaugeMetric
 }
 
-func (m *defaultQueueMetrics) add(item t) {
+func (m *defaultQueueMetrics[T]) add(item T) {
 	if m == nil {
 		return
 	}
 
 	m.adds.Inc()
-	m.deprecatedAdds.Inc()
 	m.depth.Inc()
-	m.deprecatedDepth.Inc()
 	if _, exists := m.addTimes[item]; !exists {
 		m.addTimes[item] = m.clock.Now()
 	}
 }
 
-func (m *defaultQueueMetrics) get(item t) {
+func (m *defaultQueueMetrics[T]) get(item T) {
 	if m == nil {
 		return
 	}
 
 	m.depth.Dec()
-	m.deprecatedDepth.Dec()
 	m.processingStartTimes[item] = m.clock.Now()
 	if startTime, exists := m.addTimes[item]; exists {
 		m.latency.Observe(m.sinceInSeconds(startTime))
-		m.deprecatedLatency.Observe(m.sinceInMicroseconds(startTime))
 		delete(m.addTimes, item)
 	}
 }
 
-func (m *defaultQueueMetrics) done(item t) {
+func (m *defaultQueueMetrics[T]) done(item T) {
 	if m == nil {
 		return
 	}
 
 	if startTime, exists := m.processingStartTimes[item]; exists {
 		m.workDuration.Observe(m.sinceInSeconds(startTime))
-		m.deprecatedWorkDuration.Observe(m.sinceInMicroseconds(startTime))
 		delete(m.processingStartTimes, item)
 	}
 }
 
-func (m *defaultQueueMetrics) updateUnfinishedWork() {
+func (m *defaultQueueMetrics[T]) updateUnfinishedWork() {
 	// Note that a summary metric would be better for this, but prometheus
 	// doesn't seem to have non-hacky ways to reset the summary metrics.
 	var total float64
 	var oldest float64
 	for _, t := range m.processingStartTimes {
-		age := m.sinceInMicroseconds(t)
+		age := m.sinceInSeconds(t)
 		total += age
 		if age > oldest {
 			oldest = age
 		}
 	}
-	// Convert to seconds; microseconds is unhelpfully granular for this.
-	total /= 1000000
 	m.unfinishedWorkSeconds.Set(total)
-	m.deprecatedUnfinishedWorkSeconds.Set(total)
-	m.longestRunningProcessor.Set(oldest / 1000000)
-	m.deprecatedLongestRunningProcessor.Set(oldest) // in microseconds.
+	m.longestRunningProcessor.Set(oldest)
 }
 
-type noMetrics struct{}
+type noMetrics[T any] struct{}
 
-func (noMetrics) add(item t)            {}
-func (noMetrics) get(item t)            {}
-func (noMetrics) done(item t)           {}
-func (noMetrics) updateUnfinishedWork() {}
-
-// Gets the time since the specified start in microseconds.
-func (m *defaultQueueMetrics) sinceInMicroseconds(start time.Time) float64 {
-	return float64(m.clock.Since(start).Nanoseconds() / time.Microsecond.Nanoseconds())
-}
+func (noMetrics[T]) add(item T)            {}
+func (noMetrics[T]) get(item T)            {}
+func (noMetrics[T]) done(item T)           {}
+func (noMetrics[T]) updateUnfinishedWork() {}
 
 // Gets the time since the specified start in seconds.
-func (m *defaultQueueMetrics) sinceInSeconds(start time.Time) float64 {
+func (m *defaultQueueMetrics[T]) sinceInSeconds(start time.Time) float64 {
 	return m.clock.Since(start).Seconds()
 }
 
@@ -200,13 +178,6 @@ type MetricsProvider interface {
 	NewUnfinishedWorkSecondsMetric(name string) SettableGaugeMetric
 	NewLongestRunningProcessorSecondsMetric(name string) SettableGaugeMetric
 	NewRetriesMetric(name string) CounterMetric
-	NewDeprecatedDepthMetric(name string) GaugeMetric
-	NewDeprecatedAddsMetric(name string) CounterMetric
-	NewDeprecatedLatencyMetric(name string) SummaryMetric
-	NewDeprecatedWorkDurationMetric(name string) SummaryMetric
-	NewDeprecatedUnfinishedWorkSecondsMetric(name string) SettableGaugeMetric
-	NewDeprecatedLongestRunningProcessorMicrosecondsMetric(name string) SettableGaugeMetric
-	NewDeprecatedRetriesMetric(name string) CounterMetric
 }
 
 type noopMetricsProvider struct{}
@@ -239,96 +210,46 @@ func (_ noopMetricsProvider) NewRetriesMetric(name string) CounterMetric {
 	return noopMetric{}
 }
 
-func (_ noopMetricsProvider) NewDeprecatedDepthMetric(name string) GaugeMetric {
-	return noopMetric{}
-}
+var globalMetricsProvider MetricsProvider = noopMetricsProvider{}
 
-func (_ noopMetricsProvider) NewDeprecatedAddsMetric(name string) CounterMetric {
-	return noopMetric{}
-}
+var setGlobalMetricsProviderOnce sync.Once
 
-func (_ noopMetricsProvider) NewDeprecatedLatencyMetric(name string) SummaryMetric {
-	return noopMetric{}
-}
-
-func (_ noopMetricsProvider) NewDeprecatedWorkDurationMetric(name string) SummaryMetric {
-	return noopMetric{}
-}
-
-func (_ noopMetricsProvider) NewDeprecatedUnfinishedWorkSecondsMetric(name string) SettableGaugeMetric {
-	return noopMetric{}
-}
-
-func (_ noopMetricsProvider) NewDeprecatedLongestRunningProcessorMicrosecondsMetric(name string) SettableGaugeMetric {
-	return noopMetric{}
-}
-
-func (_ noopMetricsProvider) NewDeprecatedRetriesMetric(name string) CounterMetric {
-	return noopMetric{}
-}
-
-var globalMetricsFactory = queueMetricsFactory{
-	metricsProvider: noopMetricsProvider{},
-}
-
-type queueMetricsFactory struct {
-	metricsProvider MetricsProvider
-
-	onlyOnce sync.Once
-}
-
-func (f *queueMetricsFactory) setProvider(mp MetricsProvider) {
-	f.onlyOnce.Do(func() {
-		f.metricsProvider = mp
-	})
-}
-
-func (f *queueMetricsFactory) newQueueMetrics(name string, clock clock.Clock) queueMetrics {
-	mp := f.metricsProvider
+func newQueueMetrics[T comparable](mp MetricsProvider, name string, clock clock.Clock) queueMetrics[T] {
 	if len(name) == 0 || mp == (noopMetricsProvider{}) {
-		return noMetrics{}
+		return noMetrics[T]{}
 	}
-	return &defaultQueueMetrics{
-		clock:                             clock,
-		depth:                             mp.NewDepthMetric(name),
-		adds:                              mp.NewAddsMetric(name),
-		latency:                           mp.NewLatencyMetric(name),
-		workDuration:                      mp.NewWorkDurationMetric(name),
-		unfinishedWorkSeconds:             mp.NewUnfinishedWorkSecondsMetric(name),
-		longestRunningProcessor:           mp.NewLongestRunningProcessorSecondsMetric(name),
-		deprecatedDepth:                   mp.NewDeprecatedDepthMetric(name),
-		deprecatedAdds:                    mp.NewDeprecatedAddsMetric(name),
-		deprecatedLatency:                 mp.NewDeprecatedLatencyMetric(name),
-		deprecatedWorkDuration:            mp.NewDeprecatedWorkDurationMetric(name),
-		deprecatedUnfinishedWorkSeconds:   mp.NewDeprecatedUnfinishedWorkSecondsMetric(name),
-		deprecatedLongestRunningProcessor: mp.NewDeprecatedLongestRunningProcessorMicrosecondsMetric(name),
-		addTimes:                          map[t]time.Time{},
-		processingStartTimes:              map[t]time.Time{},
+	return &defaultQueueMetrics[T]{
+		clock:                   clock,
+		depth:                   mp.NewDepthMetric(name),
+		adds:                    mp.NewAddsMetric(name),
+		latency:                 mp.NewLatencyMetric(name),
+		workDuration:            mp.NewWorkDurationMetric(name),
+		unfinishedWorkSeconds:   mp.NewUnfinishedWorkSecondsMetric(name),
+		longestRunningProcessor: mp.NewLongestRunningProcessorSecondsMetric(name),
+		addTimes:                map[T]time.Time{},
+		processingStartTimes:    map[T]time.Time{},
 	}
 }
 
-func newRetryMetrics(name string) retryMetrics {
+func newRetryMetrics(name string, provider MetricsProvider) retryMetrics {
 	var ret *defaultRetryMetrics
 	if len(name) == 0 {
 		return ret
 	}
-	return &defaultRetryMetrics{
-		retries: globalMetricsFactory.metricsProvider.NewRetriesMetric(name),
-	}
-}
 
-func newDeprecatedRetryMetrics(name string) retryMetrics {
-	var ret *defaultRetryMetrics
-	if len(name) == 0 {
-		return ret
+	if provider == nil {
+		provider = globalMetricsProvider
 	}
+
 	return &defaultRetryMetrics{
-		retries: globalMetricsFactory.metricsProvider.NewDeprecatedRetriesMetric(name),
+		retries: provider.NewRetriesMetric(name),
 	}
 }
 
 // SetProvider sets the metrics provider for all subsequently created work
 // queues. Only the first call has an effect.
 func SetProvider(metricsProvider MetricsProvider) {
-	globalMetricsFactory.setProvider(metricsProvider)
+	setGlobalMetricsProviderOnce.Do(func() {
+		globalMetricsProvider = metricsProvider
+	})
 }

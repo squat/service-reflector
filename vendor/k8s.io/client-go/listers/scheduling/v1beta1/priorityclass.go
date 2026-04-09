@@ -19,47 +19,30 @@ limitations under the License.
 package v1beta1
 
 import (
-	v1beta1 "k8s.io/api/scheduling/v1beta1"
-	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/client-go/tools/cache"
+	schedulingv1beta1 "k8s.io/api/scheduling/v1beta1"
+	labels "k8s.io/apimachinery/pkg/labels"
+	listers "k8s.io/client-go/listers"
+	cache "k8s.io/client-go/tools/cache"
 )
 
 // PriorityClassLister helps list PriorityClasses.
+// All objects returned here must be treated as read-only.
 type PriorityClassLister interface {
 	// List lists all PriorityClasses in the indexer.
-	List(selector labels.Selector) (ret []*v1beta1.PriorityClass, err error)
+	// Objects returned here must be treated as read-only.
+	List(selector labels.Selector) (ret []*schedulingv1beta1.PriorityClass, err error)
 	// Get retrieves the PriorityClass from the index for a given name.
-	Get(name string) (*v1beta1.PriorityClass, error)
+	// Objects returned here must be treated as read-only.
+	Get(name string) (*schedulingv1beta1.PriorityClass, error)
 	PriorityClassListerExpansion
 }
 
 // priorityClassLister implements the PriorityClassLister interface.
 type priorityClassLister struct {
-	indexer cache.Indexer
+	listers.ResourceIndexer[*schedulingv1beta1.PriorityClass]
 }
 
 // NewPriorityClassLister returns a new PriorityClassLister.
 func NewPriorityClassLister(indexer cache.Indexer) PriorityClassLister {
-	return &priorityClassLister{indexer: indexer}
-}
-
-// List lists all PriorityClasses in the indexer.
-func (s *priorityClassLister) List(selector labels.Selector) (ret []*v1beta1.PriorityClass, err error) {
-	err = cache.ListAll(s.indexer, selector, func(m interface{}) {
-		ret = append(ret, m.(*v1beta1.PriorityClass))
-	})
-	return ret, err
-}
-
-// Get retrieves the PriorityClass from the index for a given name.
-func (s *priorityClassLister) Get(name string) (*v1beta1.PriorityClass, error) {
-	obj, exists, err := s.indexer.GetByKey(name)
-	if err != nil {
-		return nil, err
-	}
-	if !exists {
-		return nil, errors.NewNotFound(v1beta1.Resource("priorityclass"), name)
-	}
-	return obj.(*v1beta1.PriorityClass), nil
+	return &priorityClassLister{listers.New[*schedulingv1beta1.PriorityClass](indexer, schedulingv1beta1.Resource("priorityclass"))}
 }

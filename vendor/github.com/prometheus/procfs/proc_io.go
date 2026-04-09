@@ -15,8 +15,8 @@ package procfs
 
 import (
 	"fmt"
-	"io/ioutil"
-	"os"
+
+	"github.com/prometheus/procfs/internal/util"
 )
 
 // ProcIO models the content of /proc/<pid>/io.
@@ -43,20 +43,14 @@ type ProcIO struct {
 func (p Proc) IO() (ProcIO, error) {
 	pio := ProcIO{}
 
-	f, err := os.Open(p.path("io"))
-	if err != nil {
-		return pio, err
-	}
-	defer f.Close()
-
-	data, err := ioutil.ReadAll(f)
+	data, err := util.ReadFileNoStat(p.path("io"))
 	if err != nil {
 		return pio, err
 	}
 
 	ioFormat := "rchar: %d\nwchar: %d\nsyscr: %d\nsyscw: %d\n" +
 		"read_bytes: %d\nwrite_bytes: %d\n" +
-		"cancelled_write_bytes: %d\n"
+		"cancelled_write_bytes: %d\n" //nolint:misspell
 
 	_, err = fmt.Sscanf(string(data), ioFormat, &pio.RChar, &pio.WChar, &pio.SyscR,
 		&pio.SyscW, &pio.ReadBytes, &pio.WriteBytes, &pio.CancelledWriteBytes)

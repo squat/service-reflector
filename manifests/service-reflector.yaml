@@ -5,6 +5,7 @@ metadata:
   labels:
     app.kubernetes.io/name: service-reflector
 data:
+  cluster-id: ""
   source-api: ""
 ---
 apiVersion: v1
@@ -29,18 +30,41 @@ rules:
   verbs:
   - list
   - watch
-  - create
-  - update
-  - delete
+  - get
 - apiGroups:
-  - ""
+  - "discovery.k8s.io"
   resources:
-  - namespaces
+  - endpointslices
   verbs:
   - list
   - watch
+  - get
   - create
+  - update
+  - patch
   - delete
+- apiGroups:
+  - "multicluster.x-k8s.io"
+  resources:
+  - serviceexports
+  - serviceimports
+  verbs:
+  - list
+  - watch
+  - get
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - "multicluster.x-k8s.io"
+  resources:
+  - serviceexports/status
+  - serviceimports/status
+  verbs:
+  - get
+  - update
+  - patch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -78,11 +102,17 @@ spec:
       - name: service-reflector
         image: squat/service-reflector
         args:
+        - --cluster-id=$(CLUSTER_ID)
         - --emitter.secure-port=6443
         - --emitter.insecure-port=8080
-        - --reflector.source-api=$(SOURCE_API)
+        - --source-api=$(SOURCE_API)
         - --listen=0.0.0.0:9090
         env:
+        - name: CLUSTER_ID
+          valueFrom:
+            configMapKeyRef:
+              name: service-reflector
+              key: cluster-id
         - name: SOURCE_API
           valueFrom:
             configMapKeyRef:
@@ -99,7 +129,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: service-reflector
+  name: service-reflector-metrics
   labels:
     app.kubernetes.io/name: service-reflector
 spec:
@@ -107,6 +137,17 @@ spec:
   - name: metrics
     port: 9090
     targetPort: 9090
+  selector:
+    app.kubernetes.io/name: service-reflector
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: service-reflector-emitter
+  labels:
+    app.kubernetes.io/name: service-reflector
+spec:
+  ports:
   - name: http
     port: 8080
     targetPort: 8080

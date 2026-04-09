@@ -19,9 +19,14 @@ package value
 
 import (
 	"bytes"
+	"context"
 	"fmt"
-	"sync"
 	"time"
+
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/errors"
+	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
+	"k8s.io/klog/v2"
 )
 
 func init() {
@@ -37,71 +42,35 @@ type Context interface {
 	AuthenticatedData() []byte
 }
 
-// Transformer allows a value to be transformed before being read from or written to the underlying store. The methods
-// must be able to undo the transformation caused by the other.
-type Transformer interface {
+type Read interface {
 	// TransformFromStorage may transform the provided data from its underlying storage representation or return an error.
 	// Stale is true if the object on disk is stale and a write to etcd should be issued, even if the contents of the object
 	// have not changed.
-	TransformFromStorage(data []byte, context Context) (out []byte, stale bool, err error)
+	TransformFromStorage(ctx context.Context, data []byte, dataCtx Context) (out []byte, stale bool, err error)
+}
+
+type Write interface {
 	// TransformToStorage may transform the provided data into the appropriate form in storage or return an error.
-	TransformToStorage(data []byte, context Context) (out []byte, err error)
+	TransformToStorage(ctx context.Context, data []byte, dataCtx Context) (out []byte, err error)
 }
 
-type identityTransformer struct{}
-
-// IdentityTransformer performs no transformation of the provided data.
-var IdentityTransformer Transformer = identityTransformer{}
-
-func (identityTransformer) TransformFromStorage(b []byte, ctx Context) ([]byte, bool, error) {
-	return b, false, nil
+// Transformer allows a value to be transformed before being read from or written to the underlying store. The methods
+// must be able to undo the transformation caused by the other.
+type Transformer interface {
+	Read
+	Write
 }
-func (identityTransformer) TransformToStorage(b []byte, ctx Context) ([]byte, error) {
-	return b, nil
+
+// ResourceTransformers returns a transformer for the provided resource.
+type ResourceTransformers interface {
+	TransformerForResource(resource schema.GroupResource) Transformer
 }
 
 // DefaultContext is a simple implementation of Context for a slice of bytes.
 type DefaultContext []byte
 
 // AuthenticatedData returns itself.
-func (c DefaultContext) AuthenticatedData() []byte { return []byte(c) }
-
-// MutableTransformer allows a transformer to be changed safely at runtime.
-type MutableTransformer struct {
-	lock        sync.RWMutex
-	transformer Transformer
-}
-
-// NewMutableTransformer creates a transformer that can be updated at any time by calling Set()
-func NewMutableTransformer(transformer Transformer) *MutableTransformer {
-	return &MutableTransformer{transformer: transformer}
-}
-
-// Set updates the nested transformer.
-func (t *MutableTransformer) Set(transformer Transformer) {
-	t.lock.Lock()
-	t.transformer = transformer
-	t.lock.Unlock()
-}
-
-func (t *MutableTransformer) TransformFromStorage(data []byte, context Context) (out []byte, stale bool, err error) {
-	defer func(start time.Time) {
-		RecordTransformation("from_storage", start, err)
-	}(time.Now())
-	t.lock.RLock()
-	transformer := t.transformer
-	t.lock.RUnlock()
-	return transformer.TransformFromStorage(data, context)
-}
-func (t *MutableTransformer) TransformToStorage(data []byte, context Context) (out []byte, err error) {
-	defer func(start time.Time) {
-		RecordTransformation("to_storage", start, err)
-	}(time.Now())
-	t.lock.RLock()
-	transformer := t.transformer
-	t.lock.RUnlock()
-	return transformer.TransformToStorage(data, context)
-}
+func (c DefaultContext) AuthenticatedData() []byte { return c }
 
 // PrefixTransformer holds a transformer interface and the prefix that the transformation is located under.
 type PrefixTransformer struct {
@@ -133,32 +102,120 @@ func NewPrefixTransformers(err error, transformers ...PrefixTransformer) Transfo
 // TransformFromStorage finds the first transformer with a prefix matching the provided data and returns
 // the result of transforming the value. It will always mark any transformation as stale that is not using
 // the first transformer.
-func (t *prefixTransformers) TransformFromStorage(data []byte, context Context) ([]byte, bool, error) {
+func (t *prefixTransformers) TransformFromStorage(ctx context.Context, data []byte, dataCtx Context) ([]byte, bool, error) {
+	start := time.Now()
+	var errs []error
+	resource := getResourceFromContext(ctx)
 	for i, transformer := range t.transformers {
 		if bytes.HasPrefix(data, transformer.Prefix) {
-			result, stale, err := transformer.Transformer.TransformFromStorage(data[len(transformer.Prefix):], context)
+			result, stale, err := transformer.Transformer.TransformFromStorage(ctx, data[len(transformer.Prefix):], dataCtx)
 			// To migrate away from encryption, user can specify an identity transformer higher up
 			// (in the config file) than the encryption transformer. In that scenario, the identity transformer needs to
 			// identify (during reads from disk) whether the data being read is encrypted or not. If the data is encrypted,
-			// it shall throw an error, but that error should not prevent subsequent transformers from being tried.
+			// it shall throw an error, but that error should not prevent the next subsequent transformer from being tried.
 			if len(transformer.Prefix) == 0 && err != nil {
 				continue
 			}
+			if len(transformer.Prefix) == 0 {
+				RecordTransformation(resource, "from_storage", "identity", time.Since(start), err)
+			} else {
+				RecordTransformation(resource, "from_storage", string(transformer.Prefix), time.Since(start), err)
+			}
+
+			// It is valid to have overlapping prefixes when the same encryption provider
+			// is specified multiple times but with different keys (the first provider is
+			// being rotated to and some later provider is being rotated away from).
+			//
+			// Example:
+			//
+			//  {
+			//    "aescbc": {
+			//      "keys": [
+			//        {
+			//          "name": "2",
+			//          "secret": "some key 2"
+			//        }
+			//      ]
+			//    }
+			//  },
+			//  {
+			//    "aescbc": {
+			//      "keys": [
+			//        {
+			//          "name": "1",
+			//          "secret": "some key 1"
+			//        }
+			//      ]
+			//    }
+			//  },
+			//
+			// The transformers for both aescbc configs share the prefix k8s:enc:aescbc:v1:
+			// but a failure in the first one should not prevent a later match from being attempted.
+			// Thus we never short-circuit on a prefix match that results in an error.
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+
 			return result, stale || i != 0, err
 		}
 	}
+	if err := errors.Reduce(errors.NewAggregate(errs)); err != nil {
+		logTransformErr(ctx, err, "failed to decrypt data")
+		return nil, false, err
+	}
+	RecordTransformation(resource, "from_storage", "unknown", time.Since(start), t.err)
 	return nil, false, t.err
 }
 
 // TransformToStorage uses the first transformer and adds its prefix to the data.
-func (t *prefixTransformers) TransformToStorage(data []byte, context Context) ([]byte, error) {
+func (t *prefixTransformers) TransformToStorage(ctx context.Context, data []byte, dataCtx Context) ([]byte, error) {
+	start := time.Now()
 	transformer := t.transformers[0]
-	prefixedData := make([]byte, len(transformer.Prefix), len(data)+len(transformer.Prefix))
-	copy(prefixedData, transformer.Prefix)
-	result, err := transformer.Transformer.TransformToStorage(data, context)
+	resource := getResourceFromContext(ctx)
+	result, err := transformer.Transformer.TransformToStorage(ctx, data, dataCtx)
+	RecordTransformation(resource, "to_storage", string(transformer.Prefix), time.Since(start), err)
 	if err != nil {
+		logTransformErr(ctx, err, "failed to encrypt data")
 		return nil, err
 	}
+	prefixedData := make([]byte, len(transformer.Prefix), len(result)+len(transformer.Prefix))
+	copy(prefixedData, transformer.Prefix)
 	prefixedData = append(prefixedData, result...)
 	return prefixedData, nil
+}
+
+func logTransformErr(ctx context.Context, err error, message string) {
+	requestInfo := getRequestInfoFromContext(ctx)
+	if klogLevel6 := klog.V(6); klogLevel6.Enabled() {
+		klogLevel6.InfoSDepth(
+			1,
+			message,
+			"err", err,
+			"group", requestInfo.APIGroup,
+			"version", requestInfo.APIVersion,
+			"resource", requestInfo.Resource,
+			"subresource", requestInfo.Subresource,
+			"verb", requestInfo.Verb,
+			"namespace", requestInfo.Namespace,
+			"name", requestInfo.Name,
+		)
+
+		return
+	}
+
+	klog.ErrorSDepth(1, err, message)
+}
+
+func getRequestInfoFromContext(ctx context.Context) *genericapirequest.RequestInfo {
+	if reqInfo, found := genericapirequest.RequestInfoFrom(ctx); found {
+		return reqInfo
+	}
+	klog.V(4).InfoSDepth(1, "no request info on context")
+	return &genericapirequest.RequestInfo{}
+}
+
+func getResourceFromContext(ctx context.Context) string {
+	reqInfo := getRequestInfoFromContext(ctx)
+	return schema.GroupResource{Group: reqInfo.APIGroup, Resource: reqInfo.Resource}.String()
 }

@@ -18,7 +18,27 @@ limitations under the License.
 
 package fake
 
-// FakeSubjectAccessReviews implements SubjectAccessReviewInterface
-type FakeSubjectAccessReviews struct {
+import (
+	v1beta1 "k8s.io/api/authorization/v1beta1"
+	gentype "k8s.io/client-go/gentype"
+	authorizationv1beta1 "k8s.io/client-go/kubernetes/typed/authorization/v1beta1"
+)
+
+// fakeSubjectAccessReviews implements SubjectAccessReviewInterface
+type fakeSubjectAccessReviews struct {
+	*gentype.FakeClient[*v1beta1.SubjectAccessReview]
 	Fake *FakeAuthorizationV1beta1
+}
+
+func newFakeSubjectAccessReviews(fake *FakeAuthorizationV1beta1) authorizationv1beta1.SubjectAccessReviewInterface {
+	return &fakeSubjectAccessReviews{
+		gentype.NewFakeClient[*v1beta1.SubjectAccessReview](
+			fake.Fake,
+			"",
+			v1beta1.SchemeGroupVersion.WithResource("subjectaccessreviews"),
+			v1beta1.SchemeGroupVersion.WithKind("SubjectAccessReview"),
+			func() *v1beta1.SubjectAccessReview { return &v1beta1.SubjectAccessReview{} },
+		),
+		fake,
+	}
 }

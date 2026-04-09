@@ -20,109 +20,30 @@ package fake
 
 import (
 	v1beta1 "k8s.io/api/coordination/v1beta1"
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	labels "k8s.io/apimachinery/pkg/labels"
-	schema "k8s.io/apimachinery/pkg/runtime/schema"
-	types "k8s.io/apimachinery/pkg/types"
-	watch "k8s.io/apimachinery/pkg/watch"
-	testing "k8s.io/client-go/testing"
+	coordinationv1beta1 "k8s.io/client-go/applyconfigurations/coordination/v1beta1"
+	gentype "k8s.io/client-go/gentype"
+	typedcoordinationv1beta1 "k8s.io/client-go/kubernetes/typed/coordination/v1beta1"
 )
 
-// FakeLeases implements LeaseInterface
-type FakeLeases struct {
+// fakeLeases implements LeaseInterface
+type fakeLeases struct {
+	*gentype.FakeClientWithListAndApply[*v1beta1.Lease, *v1beta1.LeaseList, *coordinationv1beta1.LeaseApplyConfiguration]
 	Fake *FakeCoordinationV1beta1
-	ns   string
 }
 
-var leasesResource = schema.GroupVersionResource{Group: "coordination.k8s.io", Version: "v1beta1", Resource: "leases"}
-
-var leasesKind = schema.GroupVersionKind{Group: "coordination.k8s.io", Version: "v1beta1", Kind: "Lease"}
-
-// Get takes name of the lease, and returns the corresponding lease object, and an error if there is any.
-func (c *FakeLeases) Get(name string, options v1.GetOptions) (result *v1beta1.Lease, err error) {
-	obj, err := c.Fake.
-		Invokes(testing.NewGetAction(leasesResource, c.ns, name), &v1beta1.Lease{})
-
-	if obj == nil {
-		return nil, err
+func newFakeLeases(fake *FakeCoordinationV1beta1, namespace string) typedcoordinationv1beta1.LeaseInterface {
+	return &fakeLeases{
+		gentype.NewFakeClientWithListAndApply[*v1beta1.Lease, *v1beta1.LeaseList, *coordinationv1beta1.LeaseApplyConfiguration](
+			fake.Fake,
+			namespace,
+			v1beta1.SchemeGroupVersion.WithResource("leases"),
+			v1beta1.SchemeGroupVersion.WithKind("Lease"),
+			func() *v1beta1.Lease { return &v1beta1.Lease{} },
+			func() *v1beta1.LeaseList { return &v1beta1.LeaseList{} },
+			func(dst, src *v1beta1.LeaseList) { dst.ListMeta = src.ListMeta },
+			func(list *v1beta1.LeaseList) []*v1beta1.Lease { return gentype.ToPointerSlice(list.Items) },
+			func(list *v1beta1.LeaseList, items []*v1beta1.Lease) { list.Items = gentype.FromPointerSlice(items) },
+		),
+		fake,
 	}
-	return obj.(*v1beta1.Lease), err
-}
-
-// List takes label and field selectors, and returns the list of Leases that match those selectors.
-func (c *FakeLeases) List(opts v1.ListOptions) (result *v1beta1.LeaseList, err error) {
-	obj, err := c.Fake.
-		Invokes(testing.NewListAction(leasesResource, leasesKind, c.ns, opts), &v1beta1.LeaseList{})
-
-	if obj == nil {
-		return nil, err
-	}
-
-	label, _, _ := testing.ExtractFromListOptions(opts)
-	if label == nil {
-		label = labels.Everything()
-	}
-	list := &v1beta1.LeaseList{ListMeta: obj.(*v1beta1.LeaseList).ListMeta}
-	for _, item := range obj.(*v1beta1.LeaseList).Items {
-		if label.Matches(labels.Set(item.Labels)) {
-			list.Items = append(list.Items, item)
-		}
-	}
-	return list, err
-}
-
-// Watch returns a watch.Interface that watches the requested leases.
-func (c *FakeLeases) Watch(opts v1.ListOptions) (watch.Interface, error) {
-	return c.Fake.
-		InvokesWatch(testing.NewWatchAction(leasesResource, c.ns, opts))
-
-}
-
-// Create takes the representation of a lease and creates it.  Returns the server's representation of the lease, and an error, if there is any.
-func (c *FakeLeases) Create(lease *v1beta1.Lease) (result *v1beta1.Lease, err error) {
-	obj, err := c.Fake.
-		Invokes(testing.NewCreateAction(leasesResource, c.ns, lease), &v1beta1.Lease{})
-
-	if obj == nil {
-		return nil, err
-	}
-	return obj.(*v1beta1.Lease), err
-}
-
-// Update takes the representation of a lease and updates it. Returns the server's representation of the lease, and an error, if there is any.
-func (c *FakeLeases) Update(lease *v1beta1.Lease) (result *v1beta1.Lease, err error) {
-	obj, err := c.Fake.
-		Invokes(testing.NewUpdateAction(leasesResource, c.ns, lease), &v1beta1.Lease{})
-
-	if obj == nil {
-		return nil, err
-	}
-	return obj.(*v1beta1.Lease), err
-}
-
-// Delete takes name of the lease and deletes it. Returns an error if one occurs.
-func (c *FakeLeases) Delete(name string, options *v1.DeleteOptions) error {
-	_, err := c.Fake.
-		Invokes(testing.NewDeleteAction(leasesResource, c.ns, name), &v1beta1.Lease{})
-
-	return err
-}
-
-// DeleteCollection deletes a collection of objects.
-func (c *FakeLeases) DeleteCollection(options *v1.DeleteOptions, listOptions v1.ListOptions) error {
-	action := testing.NewDeleteCollectionAction(leasesResource, c.ns, listOptions)
-
-	_, err := c.Fake.Invokes(action, &v1beta1.LeaseList{})
-	return err
-}
-
-// Patch applies the patch and returns the patched lease.
-func (c *FakeLeases) Patch(name string, pt types.PatchType, data []byte, subresources ...string) (result *v1beta1.Lease, err error) {
-	obj, err := c.Fake.
-		Invokes(testing.NewPatchSubresourceAction(leasesResource, c.ns, name, pt, data, subresources...), &v1beta1.Lease{})
-
-	if obj == nil {
-		return nil, err
-	}
-	return obj.(*v1beta1.Lease), err
 }

@@ -19,7 +19,7 @@ package routes
 import (
 	"net/http"
 
-	"github.com/emicklei/go-restful"
+	"github.com/emicklei/go-restful/v3"
 
 	"k8s.io/apimachinery/pkg/version"
 	"k8s.io/apiserver/pkg/endpoints/handlers/responsewriters"
@@ -39,10 +39,10 @@ func (v Version) Install(c *restful.Container) {
 	// Set up a service to return the git code version.
 	versionWS := new(restful.WebService)
 	versionWS.Path("/version")
-	versionWS.Doc("git code version from which this is built")
+	versionWS.Doc("get the version information for this server.")
 	versionWS.Route(
 		versionWS.GET("/").To(v.handleVersion).
-			Doc("get the code version").
+			Doc("get the version information for this server").
 			Operation("getCodeVersion").
 			Produces(restful.MIME_JSON).
 			Consumes(restful.MIME_JSON).

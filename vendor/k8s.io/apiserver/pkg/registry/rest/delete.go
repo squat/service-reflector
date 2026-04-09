@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apiserver/pkg/admission"
+	"k8s.io/utils/ptr"
 )
 
 // RESTDeleteStrategy defines deletion behavior on an object that follows Kubernetes
@@ -57,6 +58,8 @@ type GarbageCollectionDeleteStrategy interface {
 type RESTGracefulDeleteStrategy interface {
 	// CheckGracefulDelete should return true if the object can be gracefully deleted and set
 	// any default values on the DeleteOptions.
+	// NOTE: if return true, `options.GracePeriodSeconds` must be non-nil (nil will fail),
+	// that's what tells the deletion how "graceful" to be.
 	CheckGracefulDelete(ctx context.Context, obj runtime.Object, options *metav1.DeleteOptions) bool
 }
 
@@ -86,6 +89,15 @@ func BeforeDelete(strategy RESTDeleteStrategy, ctx context.Context, obj runtime.
 			return false, false, errors.NewConflict(schema.GroupResource{Group: gvk.Group, Resource: gvk.Kind}, objectMeta.GetName(), fmt.Errorf("the ResourceVersion in the precondition (%s) does not match the ResourceVersion in record (%s). The object might have been modified", *options.Preconditions.ResourceVersion, objectMeta.GetResourceVersion()))
 		}
 	}
+
+	// Negative values will be treated as the value `1s` on the delete path.
+	if gracePeriodSeconds := options.GracePeriodSeconds; gracePeriodSeconds != nil && *gracePeriodSeconds < 0 {
+		options.GracePeriodSeconds = ptr.To[int64](1)
+	}
+	if deletionGracePeriodSeconds := objectMeta.GetDeletionGracePeriodSeconds(); deletionGracePeriodSeconds != nil && *deletionGracePeriodSeconds < 0 {
+		objectMeta.SetDeletionGracePeriodSeconds(ptr.To[int64](1))
+	}
+
 	gracefulStrategy, ok := strategy.(RESTGracefulDeleteStrategy)
 	if !ok {
 		// If we're not deleting gracefully there's no point in updating Generation, as we won't update
@@ -114,9 +126,22 @@ func BeforeDelete(strategy RESTDeleteStrategy, ctx context.Context, obj runtime.
 			if period >= *objectMeta.GetDeletionGracePeriodSeconds() {
 				return false, true, nil
 			}
+			// Move the existing deletionTimestamp back by existing object.DeletionGracePeriod, then forward by options.DeletionGracePeriod.
+			// This moves the deletionTimestamp back, since the grace period can only be shortened in this code path.
 			newDeletionTimestamp := metav1.NewTime(
 				objectMeta.GetDeletionTimestamp().Add(-time.Second * time.Duration(*objectMeta.GetDeletionGracePeriodSeconds())).
 					Add(time.Second * time.Duration(*options.GracePeriodSeconds)))
+			// Prevent shortening the grace period moving deletionTimestamp into the past
+			if now := metav1Now(); newDeletionTimestamp.Before(&now) {
+				newDeletionTimestamp = now
+				if period != 0 {
+					// Since a graceful deletion was requested (options.GracePeriodSeconds != 0), but the entire grace period has already expired,
+					// shorten to the minimum period possible while still treating this as a graceful delete.
+					// This means the API server updates the object, another actor observes the update
+					// and is still responsible for the final delete with options.GracePeriodSeconds == 0.
+					period = int64(1)
+				}
+			}
 			objectMeta.SetDeletionTimestamp(&newDeletionTimestamp)
 			objectMeta.SetDeletionGracePeriodSeconds(&period)
 			return true, false, nil
@@ -126,11 +151,17 @@ func BeforeDelete(strategy RESTDeleteStrategy, ctx context.Context, obj runtime.
 		return false, true, nil
 	}
 
+	// `CheckGracefulDelete` will be implemented by specific strategy
 	if !gracefulStrategy.CheckGracefulDelete(ctx, obj, options) {
 		return false, false, nil
 	}
-	now := metav1.NewTime(metav1.Now().Add(time.Second * time.Duration(*options.GracePeriodSeconds)))
-	objectMeta.SetDeletionTimestamp(&now)
+
+	if options.GracePeriodSeconds == nil {
+		return false, false, errors.NewInternalError(fmt.Errorf("options.GracePeriodSeconds should not be nil"))
+	}
+
+	requestedDeletionTimestamp := metav1.NewTime(metav1Now().Add(time.Second * time.Duration(*options.GracePeriodSeconds)))
+	objectMeta.SetDeletionTimestamp(&requestedDeletionTimestamp)
 	objectMeta.SetDeletionGracePeriodSeconds(options.GracePeriodSeconds)
 	// If it's the first graceful deletion we are going to set the DeletionTimestamp to non-nil.
 	// Controllers of the object that's being deleted shouldn't take any nontrivial actions, hence its behavior changes.
@@ -139,6 +170,7 @@ func BeforeDelete(strategy RESTDeleteStrategy, ctx context.Context, obj runtime.
 	if objectMeta.GetGeneration() > 0 {
 		objectMeta.SetGeneration(objectMeta.GetGeneration() + 1)
 	}
+
 	return true, false, nil
 }
 
@@ -150,7 +182,7 @@ func AdmissionToValidateObjectDeleteFunc(admit admission.Interface, staticAttrib
 	mutating := isMutatingAdmission && mutatingAdmission.Handles(staticAttributes.GetOperation())
 	validating := isValidatingAdmission && validatingAdmission.Handles(staticAttributes.GetOperation())
 
-	return func(old runtime.Object) error {
+	return func(ctx context.Context, old runtime.Object) error {
 		if !mutating && !validating {
 			return nil
 		}
@@ -169,12 +201,12 @@ func AdmissionToValidateObjectDeleteFunc(admit admission.Interface, staticAttrib
 			staticAttributes.GetUserInfo(),
 		)
 		if mutating {
-			if err := mutatingAdmission.Admit(finalAttributes, objInterfaces); err != nil {
+			if err := mutatingAdmission.Admit(ctx, finalAttributes, objInterfaces); err != nil {
 				return err
 			}
 		}
 		if validating {
-			if err := validatingAdmission.Validate(finalAttributes, objInterfaces); err != nil {
+			if err := validatingAdmission.Validate(ctx, finalAttributes, objInterfaces); err != nil {
 				return err
 			}
 		}

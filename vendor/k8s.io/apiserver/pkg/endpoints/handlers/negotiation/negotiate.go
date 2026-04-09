@@ -26,6 +26,8 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apiserver/pkg/features"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 )
 
 // MediaTypesForSerializer returns a list of media and stream media types for the server.
@@ -33,6 +35,10 @@ func MediaTypesForSerializer(ns runtime.NegotiatedSerializer) (mediaTypes, strea
 	for _, info := range ns.SupportedMediaTypes() {
 		mediaTypes = append(mediaTypes, info.MediaType)
 		if info.StreamSerializer != nil {
+			if utilfeature.DefaultFeatureGate.Enabled(features.CBORServingAndStorage) && info.MediaType == runtime.ContentTypeCBOR {
+				streamMediaTypes = append(streamMediaTypes, runtime.ContentTypeCBORSequence)
+				continue
+			}
 			// stream=watch is the existing mime-type parameter for watch
 			streamMediaTypes = append(streamMediaTypes, info.MediaType+";stream=watch")
 		}
@@ -162,6 +168,9 @@ type MediaTypeOptions struct {
 	// has set
 	Export bool
 
+	// profile controls the discovery profile (e.g., "local" for local (non peer-aggregated) discovery)
+	Profile string
+
 	// unrecognized is a list of all unrecognized keys
 	Unrecognized []string
 
@@ -221,6 +230,10 @@ func acceptMediaTypeOptions(params map[string]string, accepts *runtime.Serialize
 		case "pretty":
 			options.Pretty = v == "1"
 
+		// controls the discovery profile (eg local vs peer-aggregated)
+		case "profile":
+			options.Profile = v
+
 		default:
 			options.Unrecognized = append(options.Unrecognized, k)
 		}
@@ -234,13 +247,6 @@ func acceptMediaTypeOptions(params map[string]string, accepts *runtime.Serialize
 	return options, true
 }
 
-type candidateMediaType struct {
-	accepted *runtime.SerializerInfo
-	clauses  goautoneg.Accept
-}
-
-type candidateMediaTypeSlice []candidateMediaType
-
 // NegotiateMediaTypeOptions returns the most appropriate content type given the accept header and
 // a list of alternatives along with the accepted media type parameters.
 func NegotiateMediaTypeOptions(header string, accepted []runtime.SerializerInfo, endpoint EndpointRestrictions) (MediaTypeOptions, bool) {
@@ -250,23 +256,19 @@ func NegotiateMediaTypeOptions(header string, accepted []runtime.SerializerInfo,
 		}, true
 	}
 
-	var candidates candidateMediaTypeSlice
 	clauses := goautoneg.ParseAccept(header)
-	for _, clause := range clauses {
+	for i := range clauses {
+		clause := &clauses[i]
 		for i := range accepted {
 			accepts := &accepted[i]
 			switch {
 			case clause.Type == accepts.MediaTypeType && clause.SubType == accepts.MediaTypeSubType,
 				clause.Type == accepts.MediaTypeType && clause.SubType == "*",
 				clause.Type == "*" && clause.SubType == "*":
-				candidates = append(candidates, candidateMediaType{accepted: accepts, clauses: clause})
+				if retVal, ret := acceptMediaTypeOptions(clause.Params, accepts, endpoint); ret {
+					return retVal, true
+				}
 			}
-		}
-	}
-
-	for _, v := range candidates {
-		if retVal, ret := acceptMediaTypeOptions(v.clauses.Params, v.accepted, endpoint); ret {
-			return retVal, true
 		}
 	}
 

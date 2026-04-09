@@ -19,145 +19,84 @@ limitations under the License.
 package fake
 
 import (
-	appsv1 "k8s.io/api/apps/v1"
+	context "context"
+	json "encoding/json"
+	fmt "fmt"
+
+	v1 "k8s.io/api/apps/v1"
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	labels "k8s.io/apimachinery/pkg/labels"
-	schema "k8s.io/apimachinery/pkg/runtime/schema"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	types "k8s.io/apimachinery/pkg/types"
-	watch "k8s.io/apimachinery/pkg/watch"
+	appsv1 "k8s.io/client-go/applyconfigurations/apps/v1"
+	applyconfigurationsautoscalingv1 "k8s.io/client-go/applyconfigurations/autoscaling/v1"
+	gentype "k8s.io/client-go/gentype"
+	typedappsv1 "k8s.io/client-go/kubernetes/typed/apps/v1"
 	testing "k8s.io/client-go/testing"
 )
 
-// FakeStatefulSets implements StatefulSetInterface
-type FakeStatefulSets struct {
+// fakeStatefulSets implements StatefulSetInterface
+type fakeStatefulSets struct {
+	*gentype.FakeClientWithListAndApply[*v1.StatefulSet, *v1.StatefulSetList, *appsv1.StatefulSetApplyConfiguration]
 	Fake *FakeAppsV1
-	ns   string
 }
 
-var statefulsetsResource = schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "statefulsets"}
-
-var statefulsetsKind = schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "StatefulSet"}
-
-// Get takes name of the statefulSet, and returns the corresponding statefulSet object, and an error if there is any.
-func (c *FakeStatefulSets) Get(name string, options v1.GetOptions) (result *appsv1.StatefulSet, err error) {
-	obj, err := c.Fake.
-		Invokes(testing.NewGetAction(statefulsetsResource, c.ns, name), &appsv1.StatefulSet{})
-
-	if obj == nil {
-		return nil, err
+func newFakeStatefulSets(fake *FakeAppsV1, namespace string) typedappsv1.StatefulSetInterface {
+	return &fakeStatefulSets{
+		gentype.NewFakeClientWithListAndApply[*v1.StatefulSet, *v1.StatefulSetList, *appsv1.StatefulSetApplyConfiguration](
+			fake.Fake,
+			namespace,
+			v1.SchemeGroupVersion.WithResource("statefulsets"),
+			v1.SchemeGroupVersion.WithKind("StatefulSet"),
+			func() *v1.StatefulSet { return &v1.StatefulSet{} },
+			func() *v1.StatefulSetList { return &v1.StatefulSetList{} },
+			func(dst, src *v1.StatefulSetList) { dst.ListMeta = src.ListMeta },
+			func(list *v1.StatefulSetList) []*v1.StatefulSet { return gentype.ToPointerSlice(list.Items) },
+			func(list *v1.StatefulSetList, items []*v1.StatefulSet) { list.Items = gentype.FromPointerSlice(items) },
+		),
+		fake,
 	}
-	return obj.(*appsv1.StatefulSet), err
-}
-
-// List takes label and field selectors, and returns the list of StatefulSets that match those selectors.
-func (c *FakeStatefulSets) List(opts v1.ListOptions) (result *appsv1.StatefulSetList, err error) {
-	obj, err := c.Fake.
-		Invokes(testing.NewListAction(statefulsetsResource, statefulsetsKind, c.ns, opts), &appsv1.StatefulSetList{})
-
-	if obj == nil {
-		return nil, err
-	}
-
-	label, _, _ := testing.ExtractFromListOptions(opts)
-	if label == nil {
-		label = labels.Everything()
-	}
-	list := &appsv1.StatefulSetList{ListMeta: obj.(*appsv1.StatefulSetList).ListMeta}
-	for _, item := range obj.(*appsv1.StatefulSetList).Items {
-		if label.Matches(labels.Set(item.Labels)) {
-			list.Items = append(list.Items, item)
-		}
-	}
-	return list, err
-}
-
-// Watch returns a watch.Interface that watches the requested statefulSets.
-func (c *FakeStatefulSets) Watch(opts v1.ListOptions) (watch.Interface, error) {
-	return c.Fake.
-		InvokesWatch(testing.NewWatchAction(statefulsetsResource, c.ns, opts))
-
-}
-
-// Create takes the representation of a statefulSet and creates it.  Returns the server's representation of the statefulSet, and an error, if there is any.
-func (c *FakeStatefulSets) Create(statefulSet *appsv1.StatefulSet) (result *appsv1.StatefulSet, err error) {
-	obj, err := c.Fake.
-		Invokes(testing.NewCreateAction(statefulsetsResource, c.ns, statefulSet), &appsv1.StatefulSet{})
-
-	if obj == nil {
-		return nil, err
-	}
-	return obj.(*appsv1.StatefulSet), err
-}
-
-// Update takes the representation of a statefulSet and updates it. Returns the server's representation of the statefulSet, and an error, if there is any.
-func (c *FakeStatefulSets) Update(statefulSet *appsv1.StatefulSet) (result *appsv1.StatefulSet, err error) {
-	obj, err := c.Fake.
-		Invokes(testing.NewUpdateAction(statefulsetsResource, c.ns, statefulSet), &appsv1.StatefulSet{})
-
-	if obj == nil {
-		return nil, err
-	}
-	return obj.(*appsv1.StatefulSet), err
-}
-
-// UpdateStatus was generated because the type contains a Status member.
-// Add a +genclient:noStatus comment above the type to avoid generating UpdateStatus().
-func (c *FakeStatefulSets) UpdateStatus(statefulSet *appsv1.StatefulSet) (*appsv1.StatefulSet, error) {
-	obj, err := c.Fake.
-		Invokes(testing.NewUpdateSubresourceAction(statefulsetsResource, "status", c.ns, statefulSet), &appsv1.StatefulSet{})
-
-	if obj == nil {
-		return nil, err
-	}
-	return obj.(*appsv1.StatefulSet), err
-}
-
-// Delete takes name of the statefulSet and deletes it. Returns an error if one occurs.
-func (c *FakeStatefulSets) Delete(name string, options *v1.DeleteOptions) error {
-	_, err := c.Fake.
-		Invokes(testing.NewDeleteAction(statefulsetsResource, c.ns, name), &appsv1.StatefulSet{})
-
-	return err
-}
-
-// DeleteCollection deletes a collection of objects.
-func (c *FakeStatefulSets) DeleteCollection(options *v1.DeleteOptions, listOptions v1.ListOptions) error {
-	action := testing.NewDeleteCollectionAction(statefulsetsResource, c.ns, listOptions)
-
-	_, err := c.Fake.Invokes(action, &appsv1.StatefulSetList{})
-	return err
-}
-
-// Patch applies the patch and returns the patched statefulSet.
-func (c *FakeStatefulSets) Patch(name string, pt types.PatchType, data []byte, subresources ...string) (result *appsv1.StatefulSet, err error) {
-	obj, err := c.Fake.
-		Invokes(testing.NewPatchSubresourceAction(statefulsetsResource, c.ns, name, pt, data, subresources...), &appsv1.StatefulSet{})
-
-	if obj == nil {
-		return nil, err
-	}
-	return obj.(*appsv1.StatefulSet), err
 }
 
 // GetScale takes name of the statefulSet, and returns the corresponding scale object, and an error if there is any.
-func (c *FakeStatefulSets) GetScale(statefulSetName string, options v1.GetOptions) (result *autoscalingv1.Scale, err error) {
+func (c *fakeStatefulSets) GetScale(ctx context.Context, statefulSetName string, options metav1.GetOptions) (result *autoscalingv1.Scale, err error) {
+	emptyResult := &autoscalingv1.Scale{}
 	obj, err := c.Fake.
-		Invokes(testing.NewGetSubresourceAction(statefulsetsResource, c.ns, "scale", statefulSetName), &autoscalingv1.Scale{})
+		Invokes(testing.NewGetSubresourceActionWithOptions(c.Resource(), c.Namespace(), "scale", statefulSetName, options), emptyResult)
 
 	if obj == nil {
-		return nil, err
+		return emptyResult, err
 	}
 	return obj.(*autoscalingv1.Scale), err
 }
 
 // UpdateScale takes the representation of a scale and updates it. Returns the server's representation of the scale, and an error, if there is any.
-func (c *FakeStatefulSets) UpdateScale(statefulSetName string, scale *autoscalingv1.Scale) (result *autoscalingv1.Scale, err error) {
+func (c *fakeStatefulSets) UpdateScale(ctx context.Context, statefulSetName string, scale *autoscalingv1.Scale, opts metav1.UpdateOptions) (result *autoscalingv1.Scale, err error) {
+	emptyResult := &autoscalingv1.Scale{}
 	obj, err := c.Fake.
-		Invokes(testing.NewUpdateSubresourceAction(statefulsetsResource, "scale", c.ns, scale), &autoscalingv1.Scale{})
+		Invokes(testing.NewUpdateSubresourceActionWithOptions(c.Resource(), "scale", c.Namespace(), scale, opts), &autoscalingv1.Scale{})
 
 	if obj == nil {
+		return emptyResult, err
+	}
+	return obj.(*autoscalingv1.Scale), err
+}
+
+// ApplyScale takes top resource name and the apply declarative configuration for scale,
+// applies it and returns the applied scale, and an error, if there is any.
+func (c *fakeStatefulSets) ApplyScale(ctx context.Context, statefulSetName string, scale *applyconfigurationsautoscalingv1.ScaleApplyConfiguration, opts metav1.ApplyOptions) (result *autoscalingv1.Scale, err error) {
+	if scale == nil {
+		return nil, fmt.Errorf("scale provided to ApplyScale must not be nil")
+	}
+	data, err := json.Marshal(scale)
+	if err != nil {
 		return nil, err
+	}
+	emptyResult := &autoscalingv1.Scale{}
+	obj, err := c.Fake.
+		Invokes(testing.NewPatchSubresourceActionWithOptions(c.Resource(), c.Namespace(), statefulSetName, types.ApplyPatchType, data, opts.ToPatchOptions(), "scale"), emptyResult)
+
+	if obj == nil {
+		return emptyResult, err
 	}
 	return obj.(*autoscalingv1.Scale), err
 }
