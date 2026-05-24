@@ -13,7 +13,7 @@ require (
 	k8s.io/apiserver v0.35.0
 	k8s.io/client-go v0.35.0
 	sigs.k8s.io/controller-runtime v0.23.3
-	sigs.k8s.io/mcs-api v0.4.2-0.20260407164133-5bcc85f3b4a5
+	sigs.k8s.io/mcs-api v0.5.0
 	sigs.k8s.io/mcs-api/controllers v0.0.0-20260407164133-5bcc85f3b4a5
 )
 
