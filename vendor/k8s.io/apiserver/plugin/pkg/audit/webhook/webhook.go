@@ -18,33 +18,65 @@ limitations under the License.
 package webhook
 
 import (
+	"context"
 	"fmt"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	utilnet "k8s.io/apimachinery/pkg/util/net"
+	"k8s.io/apimachinery/pkg/util/wait"
 	auditinternal "k8s.io/apiserver/pkg/apis/audit"
 	"k8s.io/apiserver/pkg/apis/audit/install"
 	"k8s.io/apiserver/pkg/audit"
 	"k8s.io/apiserver/pkg/util/webhook"
 	"k8s.io/client-go/rest"
+	"k8s.io/component-base/tracing"
 )
 
 const (
 	// PluginName is the name of this plugin, to be used in help and logs.
 	PluginName = "webhook"
 
-	// DefaultInitialBackoff is the default amount of time to wait before
+	// DefaultInitialBackoffDelay is the default amount of time to wait before
 	// retrying sending audit events through a webhook.
-	DefaultInitialBackoff = 10 * time.Second
+	DefaultInitialBackoffDelay = 10 * time.Second
 )
 
 func init() {
 	install.Install(audit.Scheme)
 }
 
-func loadWebhook(configFile string, groupVersion schema.GroupVersion, initialBackoff time.Duration) (*webhook.GenericWebhook, error) {
-	return webhook.NewGenericWebhook(audit.Scheme, audit.Codecs, configFile,
-		[]schema.GroupVersion{groupVersion}, initialBackoff)
+// retryOnError enforces the webhook client to retry requests
+// on error regardless of its nature.
+// The default implementation considers a very limited set of
+// 'retriable' errors, assuming correct use of HTTP codes by
+// external webhooks.
+// That may easily lead to dropped audit events. In fact, there is
+// hardly any error that could be a justified reason NOT to retry
+// sending audit events if there is even a slight chance that the
+// receiving service gets back to normal at some point.
+func retryOnError(err error) bool {
+	if err != nil {
+		return true
+	}
+	return false
+}
+
+func loadWebhook(configFile string, groupVersion schema.GroupVersion, retryBackoff wait.Backoff, customDial utilnet.DialFunc) (*webhook.GenericWebhook, error) {
+	clientConfig, err := webhook.LoadKubeconfig(configFile, customDial)
+	if err != nil {
+		return nil, err
+	}
+	w, err := webhook.NewGenericWebhook(audit.Scheme, audit.Codecs, clientConfig,
+		[]schema.GroupVersion{groupVersion}, retryBackoff)
+	if err != nil {
+		return nil, err
+	}
+
+	w.ShouldRetry = retryOnError
+	return w, nil
 }
 
 type backend struct {
@@ -54,19 +86,20 @@ type backend struct {
 
 // NewDynamicBackend returns an audit backend configured from a REST client that
 // sends events over HTTP to an external service.
-func NewDynamicBackend(rc *rest.RESTClient, initialBackoff time.Duration) audit.Backend {
+func NewDynamicBackend(rc *rest.RESTClient, retryBackoff wait.Backoff) audit.Backend {
 	return &backend{
 		w: &webhook.GenericWebhook{
-			RestClient:     rc,
-			InitialBackoff: initialBackoff,
+			RestClient:   rc,
+			RetryBackoff: retryBackoff,
+			ShouldRetry:  retryOnError,
 		},
 		name: fmt.Sprintf("dynamic_%s", PluginName),
 	}
 }
 
 // NewBackend returns an audit backend that sends events over HTTP to an external service.
-func NewBackend(kubeConfigFile string, groupVersion schema.GroupVersion, initialBackoff time.Duration) (audit.Backend, error) {
-	w, err := loadWebhook(kubeConfigFile, groupVersion, initialBackoff)
+func NewBackend(kubeConfigFile string, groupVersion schema.GroupVersion, retryBackoff wait.Backoff, customDial utilnet.DialFunc) (audit.Backend, error) {
+	w, err := loadWebhook(kubeConfigFile, groupVersion, retryBackoff, customDial)
 	if err != nil {
 		return nil, err
 	}
@@ -94,8 +127,17 @@ func (b *backend) processEvents(ev ...*auditinternal.Event) error {
 	for _, e := range ev {
 		list.Items = append(list.Items, *e)
 	}
-	return b.w.WithExponentialBackoff(func() rest.Result {
-		return b.w.RestClient.Post().Body(&list).Do()
+	return b.w.WithExponentialBackoff(context.Background(), func() rest.Result {
+		ctx, span := tracing.Start(context.Background(), "Call Audit Events webhook",
+			attribute.String("name", b.name),
+			attribute.Int("event-count", len(list.Items)),
+		)
+		// Only log audit webhook traces that exceed a 25ms per object limit plus a 50ms
+		// request overhead allowance. The high per object limit used here is primarily to
+		// allow enough time for the serialization/deserialization of audit events, which
+		// contain nested request and response objects plus additional event fields.
+		defer span.End(time.Duration(50+25*len(list.Items)) * time.Millisecond)
+		return b.w.RestClient.Post().Body(&list).Do(ctx)
 	}).Error()
 }
 

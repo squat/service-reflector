@@ -46,6 +46,7 @@ type ConditionStatus = v1.ConditionStatus
 type IncludeObjectPolicy = v1.IncludeObjectPolicy
 
 // TableOptions are used when a Table is requested by the caller.
+// +k8s:conversion-gen:explicit-from=net/url.Values
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 type TableOptions = v1.TableOptions
 
@@ -63,7 +64,7 @@ type PartialObjectMetadata = v1.PartialObjectMetadata
 type PartialObjectMetadataList struct {
 	v1.TypeMeta `json:",inline"`
 	// Standard list metadata.
-	// More info: https://git.k8s.io/community/contributors/devel/api-conventions.md#types-kinds
+	// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
 	// +optional
 	v1.ListMeta `json:"metadata,omitempty" protobuf:"bytes,2,opt,name=metadata"`
 

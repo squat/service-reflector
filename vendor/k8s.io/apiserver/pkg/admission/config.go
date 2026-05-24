@@ -20,19 +20,18 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
 
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 	"sigs.k8s.io/yaml"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apiserver/pkg/apis/apiserver"
-	apiserverv1alpha1 "k8s.io/apiserver/pkg/apis/apiserver/v1alpha1"
+	apiserverv1 "k8s.io/apiserver/pkg/apis/apiserver/v1"
 )
 
 func makeAbs(path, base string) (string, error) {
@@ -60,11 +59,11 @@ func ReadAdmissionConfiguration(pluginNames []string, configFilePath string, con
 		return configProvider{config: &apiserver.AdmissionConfiguration{}}, nil
 	}
 	// a file was provided, so we just read it.
-	data, err := ioutil.ReadFile(configFilePath)
+	data, err := os.ReadFile(configFilePath)
 	if err != nil {
 		return nil, fmt.Errorf("unable to read admission control configuration from %q [%v]", configFilePath, err)
 	}
-	codecs := serializer.NewCodecFactory(configScheme)
+	codecs := serializer.NewCodecFactory(configScheme, serializer.EnableStrict)
 	decoder := codecs.UniversalDecoder()
 	decodedObj, err := runtime.Decode(decoder, data)
 	// we were able to decode the file successfully
@@ -110,11 +109,11 @@ func ReadAdmissionConfiguration(pluginNames []string, configFilePath string, con
 	// previously read input from a non-versioned file configuration to the
 	// current input file.
 	legacyPluginsWithUnversionedConfig := sets.NewString("ImagePolicyWebhook", "PodNodeSelector")
-	externalConfig := &apiserverv1alpha1.AdmissionConfiguration{}
+	externalConfig := &apiserverv1.AdmissionConfiguration{}
 	for _, pluginName := range pluginNames {
 		if legacyPluginsWithUnversionedConfig.Has(pluginName) {
 			externalConfig.Plugins = append(externalConfig.Plugins,
-				apiserverv1alpha1.AdmissionPluginConfiguration{
+				apiserverv1.AdmissionPluginConfiguration{
 					Name: pluginName,
 					Path: configFilePath})
 		}
@@ -141,7 +140,7 @@ func GetAdmissionPluginConfigurationFor(pluginCfg apiserver.AdmissionPluginConfi
 	}
 	// there is nothing nested, so we delegate to path
 	if pluginCfg.Path != "" {
-		content, err := ioutil.ReadFile(pluginCfg.Path)
+		content, err := os.ReadFile(pluginCfg.Path)
 		if err != nil {
 			klog.Fatalf("Couldn't open admission plugin configuration %s: %#v", pluginCfg.Path, err)
 			return nil, err

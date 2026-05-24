@@ -19,31 +19,46 @@ package options
 import (
 	"fmt"
 	"net"
+	"regexp"
+	"strings"
 	"time"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
+	"k8s.io/apimachinery/pkg/util/errors"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apiserver/pkg/server"
+	"k8s.io/apiserver/pkg/util/compatibility"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
-
-	// add the generic feature gates
-	"k8s.io/apiserver/pkg/features"
+	basecompatibility "k8s.io/component-base/compatibility"
 
 	"github.com/spf13/pflag"
+)
+
+const (
+	corsAllowedOriginsHelpText = "List of allowed origins for CORS, comma separated. " +
+		"An allowed origin can be a regular expression to support subdomain matching. " +
+		"If this list is empty CORS will not be enabled. " +
+		"Please ensure each expression matches the entire hostname by anchoring " +
+		"to the start with '^' or including the '//' prefix, and by anchoring to the " +
+		"end with '$' or including the ':' port separator suffix. " +
+		"Examples of valid expressions are '//example\\.com(:|$)' and '^https://example\\.com(:|$)'"
 )
 
 // ServerRunOptions contains the options while running a generic api server.
 type ServerRunOptions struct {
 	AdvertiseAddress net.IP
 
-	CorsAllowedOriginList       []string
-	ExternalHost                string
-	MaxRequestsInFlight         int
-	MaxMutatingRequestsInFlight int
-	RequestTimeout              time.Duration
-	MaxStartupSequenceDuration  time.Duration
-	MinRequestTimeout           int
-	ShutdownDelayDuration       time.Duration
+	CorsAllowedOriginList        []string
+	HSTSDirectives               []string
+	ExternalHost                 string
+	MaxRequestsInFlight          int
+	MaxMutatingRequestsInFlight  int
+	RequestTimeout               time.Duration
+	GoawayChance                 float64
+	LivezGracePeriod             time.Duration
+	MinRequestTimeout            int
+	StorageInitializationTimeout time.Duration
+	ShutdownDelayDuration        time.Duration
 	// We intentionally did not add a flag for this option. Users of the
 	// apiserver library can wire it to a flag.
 	JSONPatchMaxCopyBytes int64
@@ -51,38 +66,104 @@ type ServerRunOptions struct {
 	// decoded in a write request. 0 means no limit.
 	// We intentionally did not add a flag for this option. Users of the
 	// apiserver library can wire it to a flag.
-	MaxRequestBodyBytes       int64
-	TargetRAMMB               int
-	EnableInfightQuotaHandler bool
+	MaxRequestBodyBytes int64
+
+	// ShutdownSendRetryAfter dictates when to initiate shutdown of the HTTP
+	// Server during the graceful termination of the apiserver. If true, we wait
+	// for non longrunning requests in flight to be drained and then initiate a
+	// shutdown of the HTTP Server. If false, we initiate a shutdown of the HTTP
+	// Server as soon as ShutdownDelayDuration has elapsed.
+	// If enabled, after ShutdownDelayDuration elapses, any incoming request is
+	// rejected with a 429 status code and a 'Retry-After' response.
+	ShutdownSendRetryAfter bool
+
+	// ShutdownWatchTerminationGracePeriod, if set to a positive value,
+	// is the maximum duration the apiserver will wait for all active
+	// watch request(s) to drain.
+	// Once this grace period elapses, the apiserver will no longer
+	// wait for any active watch request(s) in flight to drain, it will
+	// proceed to the next step in the graceful server shutdown process.
+	// If set to a positive value, the apiserver will keep track of the
+	// number of active watch request(s) in flight and during shutdown
+	// it will wait, at most, for the specified duration and allow these
+	// active watch requests to drain with some rate limiting in effect.
+	// The default is zero, which implies the apiserver will not keep
+	// track of active watch request(s) in flight and will not wait
+	// for them to drain, this maintains backward compatibility.
+	// This grace period is orthogonal to other grace periods, and
+	// it is not overridden by any other grace period.
+	ShutdownWatchTerminationGracePeriod time.Duration
+
+	// ComponentGlobalsRegistry is the registry where the effective versions and feature gates for all components are stored.
+	ComponentGlobalsRegistry basecompatibility.ComponentGlobalsRegistry
+	// ComponentName is name under which the server's global variabled are registered in the ComponentGlobalsRegistry.
+	ComponentName string
+	// EmulationForwardCompatible is an option to implicitly enable all APIs which are introduced after the emulation version and
+	// have higher priority than APIs of the same group resource enabled at the emulation version.
+	// If true, all APIs that have higher priority than the APIs(beta+) of the same group resource enabled at the emulation version will be installed.
+	// This is needed when a controller implementation migrates to newer API versions, for the binary version, and also uses the newer API versions even when emulation version is set.
+	// Not applicable to alpha APIs.
+	EmulationForwardCompatible bool
+	// RuntimeConfigEmulationForwardCompatible is an option to explicitly enable specific APIs introduced after the emulation version through the runtime-config.
+	// If true, APIs identified by group/version that are enabled in the --runtime-config flag will be installed even if it is introduced after the emulation version. --runtime-config flag values that identify multiple APIs, such as api/all,api/ga,api/beta, are not influenced by this flag and will only enable APIs available at the current emulation version.
+	// If false, error would be thrown if any GroupVersion or GroupVersionResource explicitly enabled in the --runtime-config flag is introduced after the emulation version.
+	RuntimeConfigEmulationForwardCompatible bool
 }
 
 func NewServerRunOptions() *ServerRunOptions {
+	if compatibility.DefaultComponentGlobalsRegistry.EffectiveVersionFor(basecompatibility.DefaultKubeComponent) == nil {
+		featureGate := utilfeature.DefaultMutableFeatureGate
+		effectiveVersion := compatibility.DefaultBuildEffectiveVersion()
+		utilruntime.Must(compatibility.DefaultComponentGlobalsRegistry.Register(basecompatibility.DefaultKubeComponent, effectiveVersion, featureGate))
+	}
+
+	return NewServerRunOptionsForComponent(basecompatibility.DefaultKubeComponent, compatibility.DefaultComponentGlobalsRegistry)
+}
+
+func NewServerRunOptionsForComponent(componentName string, componentGlobalsRegistry basecompatibility.ComponentGlobalsRegistry) *ServerRunOptions {
 	defaults := server.NewConfig(serializer.CodecFactory{})
 	return &ServerRunOptions{
-		MaxRequestsInFlight:         defaults.MaxRequestsInFlight,
-		MaxMutatingRequestsInFlight: defaults.MaxMutatingRequestsInFlight,
-		RequestTimeout:              defaults.RequestTimeout,
-		MaxStartupSequenceDuration:  defaults.MaxStartupSequenceDuration,
-		MinRequestTimeout:           defaults.MinRequestTimeout,
-		ShutdownDelayDuration:       defaults.ShutdownDelayDuration,
-		JSONPatchMaxCopyBytes:       defaults.JSONPatchMaxCopyBytes,
-		MaxRequestBodyBytes:         defaults.MaxRequestBodyBytes,
+		MaxRequestsInFlight:                 defaults.MaxRequestsInFlight,
+		MaxMutatingRequestsInFlight:         defaults.MaxMutatingRequestsInFlight,
+		RequestTimeout:                      defaults.RequestTimeout,
+		LivezGracePeriod:                    defaults.LivezGracePeriod,
+		MinRequestTimeout:                   defaults.MinRequestTimeout,
+		StorageInitializationTimeout:        defaults.StorageInitializationTimeout,
+		ShutdownDelayDuration:               defaults.ShutdownDelayDuration,
+		ShutdownWatchTerminationGracePeriod: defaults.ShutdownWatchTerminationGracePeriod,
+		JSONPatchMaxCopyBytes:               defaults.JSONPatchMaxCopyBytes,
+		MaxRequestBodyBytes:                 defaults.MaxRequestBodyBytes,
+		ShutdownSendRetryAfter:              false,
+		ComponentName:                       componentName,
+		ComponentGlobalsRegistry:            componentGlobalsRegistry,
 	}
 }
 
-// ApplyOptions applies the run options to the method receiver and returns self
+// ApplyTo applies the run options to the method receiver and returns self
 func (s *ServerRunOptions) ApplyTo(c *server.Config) error {
+	if err := s.ComponentGlobalsRegistry.SetFallback(); err != nil {
+		return err
+	}
 	c.CorsAllowedOriginList = s.CorsAllowedOriginList
+	c.HSTSDirectives = s.HSTSDirectives
 	c.ExternalAddress = s.ExternalHost
 	c.MaxRequestsInFlight = s.MaxRequestsInFlight
 	c.MaxMutatingRequestsInFlight = s.MaxMutatingRequestsInFlight
-	c.MaxStartupSequenceDuration = s.MaxStartupSequenceDuration
+	c.LivezGracePeriod = s.LivezGracePeriod
 	c.RequestTimeout = s.RequestTimeout
+	c.GoawayChance = s.GoawayChance
 	c.MinRequestTimeout = s.MinRequestTimeout
+	c.StorageInitializationTimeout = s.StorageInitializationTimeout
 	c.ShutdownDelayDuration = s.ShutdownDelayDuration
 	c.JSONPatchMaxCopyBytes = s.JSONPatchMaxCopyBytes
 	c.MaxRequestBodyBytes = s.MaxRequestBodyBytes
 	c.PublicAddress = s.AdvertiseAddress
+	c.ShutdownSendRetryAfter = s.ShutdownSendRetryAfter
+	c.ShutdownWatchTerminationGracePeriod = s.ShutdownWatchTerminationGracePeriod
+	c.EffectiveVersion = s.ComponentGlobalsRegistry.EffectiveVersionFor(s.ComponentName)
+	c.FeatureGate = s.ComponentGlobalsRegistry.FeatureGateFor(s.ComponentName)
+	c.EmulationForwardCompatible = s.EmulationForwardCompatible
+	c.RuntimeConfigEmulationForwardCompatible = s.RuntimeConfigEmulationForwardCompatible
 
 	return nil
 }
@@ -108,57 +189,142 @@ func (s *ServerRunOptions) DefaultAdvertiseAddress(secure *SecureServingOptions)
 // Validate checks validation of ServerRunOptions
 func (s *ServerRunOptions) Validate() []error {
 	errors := []error{}
-	if s.TargetRAMMB < 0 {
-		errors = append(errors, fmt.Errorf("--target-ram-mb can not be negative value"))
+
+	if s.LivezGracePeriod < 0 {
+		errors = append(errors, fmt.Errorf("--livez-grace-period can not be a negative value"))
 	}
 
-	if s.MaxStartupSequenceDuration < 0 {
-		errors = append(errors, fmt.Errorf("--maximum-startup-sequence-duration can not be a negative value"))
+	if s.MaxRequestsInFlight < 0 {
+		errors = append(errors, fmt.Errorf("--max-requests-inflight can not be negative value"))
 	}
-
-	if s.EnableInfightQuotaHandler {
-		if !utilfeature.DefaultFeatureGate.Enabled(features.RequestManagement) {
-			errors = append(errors, fmt.Errorf("--enable-inflight-quota-handler can not be set if feature "+
-				"gate RequestManagement is disabled"))
-		}
-		if s.MaxMutatingRequestsInFlight != 0 {
-			errors = append(errors, fmt.Errorf("--max-mutating-requests-inflight=%v "+
-				"can not be set if enabled inflight quota handler", s.MaxMutatingRequestsInFlight))
-		}
-		if s.MaxRequestsInFlight != 0 {
-			errors = append(errors, fmt.Errorf("--max-requests-inflight=%v "+
-				"can not be set if enabled inflight quota handler", s.MaxRequestsInFlight))
-		}
-	} else {
-		if s.MaxRequestsInFlight < 0 {
-			errors = append(errors, fmt.Errorf("--max-requests-inflight can not be negative value"))
-		}
-		if s.MaxMutatingRequestsInFlight < 0 {
-			errors = append(errors, fmt.Errorf("--max-mutating-requests-inflight can not be negative value"))
-		}
+	if s.MaxMutatingRequestsInFlight < 0 {
+		errors = append(errors, fmt.Errorf("--max-mutating-requests-inflight can not be negative value"))
 	}
 
 	if s.RequestTimeout.Nanoseconds() < 0 {
 		errors = append(errors, fmt.Errorf("--request-timeout can not be negative value"))
 	}
 
+	if s.GoawayChance < 0 || s.GoawayChance > 0.02 {
+		errors = append(errors, fmt.Errorf("--goaway-chance can not be less than 0 or greater than 0.02"))
+	}
+
 	if s.MinRequestTimeout < 0 {
 		errors = append(errors, fmt.Errorf("--min-request-timeout can not be negative value"))
+	}
+
+	if s.StorageInitializationTimeout < 0 {
+		errors = append(errors, fmt.Errorf("--storage-initialization-timeout can not be negative value"))
 	}
 
 	if s.ShutdownDelayDuration < 0 {
 		errors = append(errors, fmt.Errorf("--shutdown-delay-duration can not be negative value"))
 	}
 
+	if s.ShutdownWatchTerminationGracePeriod < 0 {
+		errors = append(errors, fmt.Errorf("shutdown-watch-termination-grace-period, if provided, can not be a negative value"))
+	}
+
 	if s.JSONPatchMaxCopyBytes < 0 {
-		errors = append(errors, fmt.Errorf("--json-patch-max-copy-bytes can not be negative value"))
+		errors = append(errors, fmt.Errorf("ServerRunOptions.JSONPatchMaxCopyBytes can not be negative value"))
 	}
 
 	if s.MaxRequestBodyBytes < 0 {
-		errors = append(errors, fmt.Errorf("--max-resource-write-bytes can not be negative value"))
+		errors = append(errors, fmt.Errorf("ServerRunOptions.MaxRequestBodyBytes can not be negative value"))
 	}
 
+	if err := validateHSTSDirectives(s.HSTSDirectives); err != nil {
+		errors = append(errors, err)
+	}
+
+	if err := validateCorsAllowedOriginList(s.CorsAllowedOriginList); err != nil {
+		errors = append(errors, err)
+	}
+	if errs := s.ComponentGlobalsRegistry.Validate(); len(errs) != 0 {
+		errors = append(errors, errs...)
+	}
+	effectiveVersion := s.ComponentGlobalsRegistry.EffectiveVersionFor(s.ComponentName)
+	if effectiveVersion == nil {
+		return errors
+	}
+	notEmulationMode := effectiveVersion.BinaryVersion().WithPatch(0).EqualTo(effectiveVersion.EmulationVersion())
+	if notEmulationMode && s.EmulationForwardCompatible {
+		errors = append(errors, fmt.Errorf("ServerRunOptions.EmulationForwardCompatible cannot be set to true if the emulation version is the same as the binary version"))
+	}
+	if notEmulationMode && s.RuntimeConfigEmulationForwardCompatible {
+		errors = append(errors, fmt.Errorf("ServerRunOptions.RuntimeConfigEmulationForwardCompatible cannot be set to true if the emulation version is the same as the binary version"))
+	}
 	return errors
+}
+
+func validateHSTSDirectives(hstsDirectives []string) error {
+	// HSTS Headers format: Strict-Transport-Security:max-age=expireTime [;includeSubDomains] [;preload]
+	// See https://tools.ietf.org/html/rfc6797#section-6.1 for more information
+	allErrors := []error{}
+	for _, hstsDirective := range hstsDirectives {
+		if len(strings.TrimSpace(hstsDirective)) == 0 {
+			allErrors = append(allErrors, fmt.Errorf("empty value in strict-transport-security-directives"))
+			continue
+		}
+		if hstsDirective != "includeSubDomains" && hstsDirective != "preload" {
+			maxAgeDirective := strings.Split(hstsDirective, "=")
+			if len(maxAgeDirective) != 2 || maxAgeDirective[0] != "max-age" {
+				allErrors = append(allErrors, fmt.Errorf("--strict-transport-security-directives invalid, allowed values: max-age=expireTime, includeSubDomains, preload. see https://tools.ietf.org/html/rfc6797#section-6.1 for more information"))
+			}
+		}
+	}
+	return errors.NewAggregate(allErrors)
+}
+
+func validateCorsAllowedOriginList(corsAllowedOriginList []string) error {
+	allErrors := []error{}
+	validateRegexFn := func(regexpStr string) error {
+		if _, err := regexp.Compile(regexpStr); err != nil {
+			return err
+		}
+
+		// the regular expression should pin to the start and end of the host
+		// in the origin header, this will prevent CVE-2022-1996.
+		// possible ways it can pin to the start of host in the origin header:
+		//   - match the start of the origin with '^'
+		//   - match what separates the scheme and host with '//' or '://',
+		//     this pins to the start of host in the origin header.
+		// possible ways it can match the end of the host in the origin header:
+		//   - match the end of the origin with '$'
+		//   - with a capture group that matches the host and port separator '(:|$)'
+		// We will relax the validation to check if these regex markers
+		// are present in the user specified expression.
+		var pinStart, pinEnd bool
+		for _, prefix := range []string{"^", "//"} {
+			if strings.Contains(regexpStr, prefix) {
+				pinStart = true
+				break
+			}
+		}
+		for _, suffix := range []string{"$", ":"} {
+			if strings.Contains(regexpStr, suffix) {
+				pinEnd = true
+				break
+			}
+		}
+		if !pinStart || !pinEnd {
+			return fmt.Errorf("regular expression does not pin to start/end of host in the origin header")
+		}
+		return nil
+	}
+
+	for _, regexp := range corsAllowedOriginList {
+		if len(regexp) == 0 {
+			allErrors = append(allErrors, fmt.Errorf("empty value in --cors-allowed-origins, help: %s", corsAllowedOriginsHelpText))
+			continue
+		}
+
+		if err := validateRegexFn(regexp); err != nil {
+			err = fmt.Errorf("--cors-allowed-origins has an invalid regular expression: %v, help: %s", err, corsAllowedOriginsHelpText)
+			allErrors = append(allErrors, err)
+		}
+	}
+	return errors.NewAggregate(allErrors)
 }
 
 // AddUniversalFlags adds flags for a specific APIServer to the specified FlagSet
@@ -172,36 +338,41 @@ func (s *ServerRunOptions) AddUniversalFlags(fs *pflag.FlagSet) {
 		"will be used. If --bind-address is unspecified, the host's default interface will "+
 		"be used.")
 
-	fs.StringSliceVar(&s.CorsAllowedOriginList, "cors-allowed-origins", s.CorsAllowedOriginList, ""+
-		"List of allowed origins for CORS, comma separated.  An allowed origin can be a regular "+
-		"expression to support subdomain matching. If this list is empty CORS will not be enabled.")
+	fs.StringSliceVar(&s.CorsAllowedOriginList, "cors-allowed-origins", s.CorsAllowedOriginList, corsAllowedOriginsHelpText)
 
-	fs.IntVar(&s.TargetRAMMB, "target-ram-mb", s.TargetRAMMB,
-		"Memory limit for apiserver in MB (used to configure sizes of caches, etc.)")
+	fs.StringSliceVar(&s.HSTSDirectives, "strict-transport-security-directives", s.HSTSDirectives, ""+
+		"List of directives for HSTS, comma separated. If this list is empty, then HSTS directives will not "+
+		"be added. Example: 'max-age=31536000,includeSubDomains,preload'")
 
 	fs.StringVar(&s.ExternalHost, "external-hostname", s.ExternalHost,
-		"The hostname to use when generating externalized URLs for this master (e.g. Swagger API Docs).")
-
-	deprecatedMasterServiceNamespace := metav1.NamespaceDefault
-	fs.StringVar(&deprecatedMasterServiceNamespace, "master-service-namespace", deprecatedMasterServiceNamespace, ""+
-		"DEPRECATED: the namespace from which the kubernetes master services should be injected into pods.")
+		"The hostname to use when generating externalized URLs for this master (e.g. Swagger API Docs or OpenID Discovery).")
 
 	fs.IntVar(&s.MaxRequestsInFlight, "max-requests-inflight", s.MaxRequestsInFlight, ""+
-		"The maximum number of non-mutating requests in flight at a given time. When the server exceeds this, "+
-		"it rejects requests. Zero for no limit.")
+		"This and --max-mutating-requests-inflight are summed to determine the server's total concurrency limit "+
+		"(which must be positive) if --enable-priority-and-fairness is true. "+
+		"Otherwise, this flag limits the maximum number of non-mutating requests in flight, "+
+		"or a zero value disables the limit completely.")
 
 	fs.IntVar(&s.MaxMutatingRequestsInFlight, "max-mutating-requests-inflight", s.MaxMutatingRequestsInFlight, ""+
-		"The maximum number of mutating requests in flight at a given time. When the server exceeds this, "+
-		"it rejects requests. Zero for no limit.")
+		"This and --max-requests-inflight are summed to determine the server's total concurrency limit "+
+		"(which must be positive) if --enable-priority-and-fairness is true. "+
+		"Otherwise, this flag limits the maximum number of mutating requests in flight, "+
+		"or a zero value disables the limit completely.")
 
 	fs.DurationVar(&s.RequestTimeout, "request-timeout", s.RequestTimeout, ""+
 		"An optional field indicating the duration a handler must keep a request open before timing "+
 		"it out. This is the default request timeout for requests but may be overridden by flags such as "+
 		"--min-request-timeout for specific types of requests.")
 
-	fs.DurationVar(&s.MaxStartupSequenceDuration, "maximum-startup-sequence-duration", s.MaxStartupSequenceDuration, ""+
+	fs.Float64Var(&s.GoawayChance, "goaway-chance", s.GoawayChance, ""+
+		"To prevent HTTP/2 clients from getting stuck on a single apiserver, randomly close a connection (GOAWAY). "+
+		"The client's other in-flight requests won't be affected, and the client will reconnect, likely landing on a different apiserver after going through the load balancer again. "+
+		"This argument sets the fraction of requests that will be sent a GOAWAY. Clusters with single apiservers, or which don't use a load balancer, should NOT enable this. "+
+		"Min is 0 (off), Max is .02 (1/50 requests); .001 (1/1000) is a recommended starting point.")
+
+	fs.DurationVar(&s.LivezGracePeriod, "livez-grace-period", s.LivezGracePeriod, ""+
 		"This option represents the maximum amount of time it should take for apiserver to complete its startup sequence "+
-		"and become healthy. From apiserver's start time to when this amount of time has elapsed, /healthz will assume "+
+		"and become live. From apiserver's start time to when this amount of time has elapsed, /livez will assume "+
 		"that unfinished post-start hooks will complete successfully and therefore return true.")
 
 	fs.IntVar(&s.MinRequestTimeout, "min-request-timeout", s.MinRequestTimeout, ""+
@@ -210,13 +381,34 @@ func (s *ServerRunOptions) AddUniversalFlags(fs *pflag.FlagSet) {
 		"handler, which picks a randomized value above this number as the connection timeout, "+
 		"to spread out load.")
 
-	fs.BoolVar(&s.EnableInfightQuotaHandler, "enable-inflight-quota-handler", s.EnableInfightQuotaHandler, ""+
-		"If true, replace the max-in-flight handler with an enhanced one that queues and dispatches with priority and fairness")
+	fs.DurationVar(&s.StorageInitializationTimeout, "storage-initialization-timeout", s.StorageInitializationTimeout,
+		"Maximum amount of time to wait for storage initialization before declaring apiserver ready. Defaults to 1m.")
 
 	fs.DurationVar(&s.ShutdownDelayDuration, "shutdown-delay-duration", s.ShutdownDelayDuration, ""+
-		"Time to delay the termination. During that time the server keeps serving requests normally and /healthz "+
-		"returns success, but /readzy immediately returns failure. Graceful termination starts after this delay "+
+		"Time to delay the termination. During that time the server keeps serving requests normally. The endpoints /healthz and /livez "+
+		"will return success, but /readyz immediately returns failure. Graceful termination starts after this delay "+
 		"has elapsed. This can be used to allow load balancer to stop sending traffic to this server.")
 
-	utilfeature.DefaultMutableFeatureGate.AddFlag(fs)
+	fs.BoolVar(&s.ShutdownSendRetryAfter, "shutdown-send-retry-after", s.ShutdownSendRetryAfter, ""+
+		"If true the HTTP Server will continue listening until all non long running request(s) in flight have been drained, "+
+		"during this window all incoming requests will be rejected with a status code 429 and a 'Retry-After' response header, "+
+		"in addition 'Connection: close' response header is set in order to tear down the TCP connection when idle.")
+
+	fs.DurationVar(&s.ShutdownWatchTerminationGracePeriod, "shutdown-watch-termination-grace-period", s.ShutdownWatchTerminationGracePeriod, ""+
+		"This option, if set, represents the maximum amount of grace period the apiserver will wait "+
+		"for active watch request(s) to drain during the graceful server shutdown window.")
+
+	s.ComponentGlobalsRegistry.AddFlags(fs)
+	fs.BoolVar(&s.EmulationForwardCompatible, "emulation-forward-compatible", s.EmulationForwardCompatible, ""+
+		"If true, for any beta+ APIs enabled by default or by --runtime-config at the emulation version, their future versions with higher priority/stability will be auto enabled even if they introduced after the emulation version. "+
+		"Can only be set to true if the emulation version is lower than the binary version.")
+	fs.BoolVar(&s.RuntimeConfigEmulationForwardCompatible, "runtime-config-emulation-forward-compatible", s.RuntimeConfigEmulationForwardCompatible, ""+
+		"If true, APIs identified by group/version that are enabled in the --runtime-config flag will be installed even if it is introduced after the emulation version. "+
+		"If false, server would fail to start if any APIs identified by group/version that are enabled in the --runtime-config flag are introduced after the emulation version. "+
+		"Can only be set to true if the emulation version is lower than the binary version.")
+}
+
+// Complete fills missing fields with defaults.
+func (s *ServerRunOptions) Complete() error {
+	return s.ComponentGlobalsRegistry.SetFallback()
 }

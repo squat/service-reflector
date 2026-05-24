@@ -1,6 +1,5 @@
-.cache/
-.container*
-.manifest*
-.push*
-bin/
-emitter.local.config/
+.direnv/
+/.pre-commit-config.yaml
+/result*
+/e2e-*/
+/help.txt

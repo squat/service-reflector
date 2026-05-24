@@ -17,17 +17,17 @@ limitations under the License.
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
 	"runtime/debug"
 
-	"k8s.io/klog"
-
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apiserver/pkg/server/healthz"
 	restclient "k8s.io/client-go/rest"
+	"k8s.io/klog/v2"
 )
 
 // PostStartHookFunc is a function that is called after the server has started.
@@ -36,6 +36,7 @@ import (
 //  2. conflicts between the different processes all trying to perform the same action
 //  3. partially complete work (API server crashes while running your hook)
 //  4. API server access **BEFORE** your hook has completed
+//
 // Think of it like a mini-controller that is super privileged and gets to run in-process
 // If you use this feature, tag @deads2k on github who has promised to review code for anyone's PostStartHook
 // until it becomes easier to use.
@@ -48,8 +49,8 @@ type PreShutdownHookFunc func() error
 type PostStartHookContext struct {
 	// LoopbackClientConfig is a config for a privileged loopback connection to the API server
 	LoopbackClientConfig *restclient.Config
-	// StopCh is the channel that will be closed when the server stops
-	StopCh <-chan struct{}
+	// Context gets cancelled when the server stops.
+	context.Context
 }
 
 // PostStartHookProvider is an interface in addition to provide a post start hook for the api server
@@ -67,6 +68,13 @@ type postStartHookEntry struct {
 	done chan struct{}
 }
 
+type PostStartHookConfigEntry struct {
+	hook PostStartHookFunc
+	// originatingStack holds the stack that registered postStartHooks. This allows us to show a more helpful message
+	// for duplicate registration.
+	originatingStack string
+}
+
 type preShutdownHookEntry struct {
 	hook PreShutdownHookFunc
 }
@@ -77,9 +85,10 @@ func (s *GenericAPIServer) AddPostStartHook(name string, hook PostStartHookFunc)
 		return fmt.Errorf("missing name")
 	}
 	if hook == nil {
-		return nil
+		return fmt.Errorf("hook func may not be nil: %q", name)
 	}
 	if s.disabledPostStartHooks.Has(name) {
+		klog.V(1).Infof("skipping %q because it was explicitly disabled", name)
 		return nil
 	}
 
@@ -97,7 +106,7 @@ func (s *GenericAPIServer) AddPostStartHook(name string, hook PostStartHookFunc)
 	// done is closed when the poststarthook is finished.  This is used by the health check to be able to indicate
 	// that the poststarthook is finished
 	done := make(chan struct{})
-	if err := s.AddDelayedHealthzChecks(s.maxStartupSequenceDuration, postStartHookHealthz{name: "poststarthook/" + name, done: done}); err != nil {
+	if err := s.AddBootSequenceHealthChecks(postStartHookHealthz{name: "poststarthook/" + name, done: done}); err != nil {
 		return err
 	}
 	s.postStartHooks[name] = postStartHookEntry{hook: hook, originatingStack: string(debug.Stack()), done: done}
@@ -143,15 +152,15 @@ func (s *GenericAPIServer) AddPreShutdownHookOrDie(name string, hook PreShutdown
 	}
 }
 
-// RunPostStartHooks runs the PostStartHooks for the server
-func (s *GenericAPIServer) RunPostStartHooks(stopCh <-chan struct{}) {
+// RunPostStartHooks runs the PostStartHooks for the server.
+func (s *GenericAPIServer) RunPostStartHooks(ctx context.Context) {
 	s.postStartHookLock.Lock()
 	defer s.postStartHookLock.Unlock()
 	s.postStartHooksCalled = true
 
 	context := PostStartHookContext{
 		LoopbackClientConfig: s.LoopbackClientConfig,
-		StopCh:               stopCh,
+		Context:              ctx,
 	}
 
 	for hookName, hookEntry := range s.postStartHooks {
@@ -219,19 +228,19 @@ type postStartHookHealthz struct {
 	done chan struct{}
 }
 
-var _ healthz.HealthzChecker = postStartHookHealthz{}
+var _ healthz.HealthChecker = postStartHookHealthz{}
 
 func (h postStartHookHealthz) Name() string {
 	return h.name
 }
 
-var hookNotFinished = errors.New("not finished")
+var errHookNotFinished = errors.New("not finished")
 
 func (h postStartHookHealthz) Check(req *http.Request) error {
 	select {
 	case <-h.done:
 		return nil
 	default:
-		return hookNotFinished
+		return errHookNotFinished
 	}
 }

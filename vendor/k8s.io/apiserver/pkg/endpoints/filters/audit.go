@@ -18,6 +18,7 @@ package filters
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -29,62 +30,62 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	auditinternal "k8s.io/apiserver/pkg/apis/audit"
 	"k8s.io/apiserver/pkg/audit"
-	"k8s.io/apiserver/pkg/audit/policy"
 	"k8s.io/apiserver/pkg/endpoints/handlers/responsewriters"
 	"k8s.io/apiserver/pkg/endpoints/request"
+	"k8s.io/apiserver/pkg/endpoints/responsewriter"
 )
 
 // WithAudit decorates a http.Handler with audit logging information for all the
 // requests coming to the server. Audit level is decided according to requests'
 // attributes and audit policy. Logs are emitted to the audit sink to
 // process events. If sink or audit policy is nil, no decoration takes place.
-func WithAudit(handler http.Handler, sink audit.Sink, policy policy.Checker, longRunningCheck request.LongRunningRequestCheck) http.Handler {
+func WithAudit(handler http.Handler, sink audit.Sink, policy audit.PolicyRuleEvaluator, longRunningCheck request.LongRunningRequestCheck) http.Handler {
 	if sink == nil || policy == nil {
 		return handler
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		req, ev, omitStages, err := createAuditEventAndAttachToContext(req, policy)
+		ac, err := evaluatePolicyAndCreateAuditEvent(req, policy, sink)
 		if err != nil {
 			utilruntime.HandleError(fmt.Errorf("failed to create audit event: %v", err))
 			responsewriters.InternalError(w, req, errors.New("failed to create audit event"))
 			return
 		}
-		ctx := req.Context()
-		if ev == nil || ctx == nil {
+
+		if !ac.Enabled() {
 			handler.ServeHTTP(w, req)
 			return
 		}
 
-		ev.Stage = auditinternal.StageRequestReceived
-		if processed := processAuditEvent(sink, ev, omitStages); !processed {
-			audit.ApiserverAuditDroppedCounter.Inc()
+		ctx := req.Context()
+
+		if processed := ac.ProcessEventStage(ctx, auditinternal.StageRequestReceived); !processed {
+			audit.ApiserverAuditDroppedCounter.WithContext(ctx).Inc()
 			responsewriters.InternalError(w, req, errors.New("failed to store audit event"))
 			return
 		}
 
 		// intercept the status code
-		var longRunningSink audit.Sink
+		isLongRunning := false
 		if longRunningCheck != nil {
 			ri, _ := request.RequestInfoFrom(ctx)
 			if longRunningCheck(req, ri) {
-				longRunningSink = sink
+				isLongRunning = true
 			}
 		}
-		respWriter := decorateResponseWriter(w, ev, longRunningSink, omitStages)
+		respWriter := decorateResponseWriter(ctx, w, isLongRunning)
 
 		// send audit event when we leave this func, either via a panic or cleanly. In the case of long
 		// running requests, this will be the second audit event.
 		defer func() {
 			if r := recover(); r != nil {
 				defer panic(r)
-				ev.Stage = auditinternal.StagePanic
-				ev.ResponseStatus = &metav1.Status{
+				ac.SetEventResponseStatus(&metav1.Status{
 					Code:    http.StatusInternalServerError,
 					Status:  metav1.StatusFailure,
 					Reason:  metav1.StatusReasonInternalError,
 					Message: fmt.Sprintf("APIServer panic'd: %v", r),
-				}
-				processAuditEvent(sink, ev, omitStages)
+				})
+				ac.ProcessEventStage(ctx, auditinternal.StagePanic)
 				return
 			}
 
@@ -95,113 +96,119 @@ func WithAudit(handler http.Handler, sink audit.Sink, policy policy.Checker, lon
 				Status:  metav1.StatusSuccess,
 				Message: "Connection closed early",
 			}
-			if ev.ResponseStatus == nil && longRunningSink != nil {
-				ev.ResponseStatus = fakedSuccessStatus
-				ev.Stage = auditinternal.StageResponseStarted
-				processAuditEvent(longRunningSink, ev, omitStages)
+			if ac.GetEventResponseStatus() == nil {
+				ac.SetEventResponseStatus(fakedSuccessStatus)
+				if isLongRunning {
+					// A nil ResponseStatus means the writer never processed the ResponseStarted stage, so do that now.
+					ac.ProcessEventStage(ctx, auditinternal.StageResponseStarted)
+				}
 			}
-
-			ev.Stage = auditinternal.StageResponseComplete
-			if ev.ResponseStatus == nil {
-				ev.ResponseStatus = fakedSuccessStatus
-			}
-			processAuditEvent(sink, ev, omitStages)
+			writeLatencyToAnnotation(ctx)
+			ac.ProcessEventStage(ctx, auditinternal.StageResponseComplete)
 		}()
 		handler.ServeHTTP(respWriter, req)
 	})
 }
 
-// createAuditEventAndAttachToContext is responsible for creating the audit event
-// and attaching it to the appropriate request context. It returns:
-// - context with audit event attached to it
-// - created audit event
+// evaluatePolicyAndCreateAuditEvent is responsible for evaluating the audit
+// policy configuration applicable to the request and initializing the audit
+// context with the audit config for the request, the sink to write to, and the request metadata.
 // - error if anything bad happened
-func createAuditEventAndAttachToContext(req *http.Request, policy policy.Checker) (*http.Request, *auditinternal.Event, []auditinternal.Stage, error) {
+func evaluatePolicyAndCreateAuditEvent(req *http.Request, policy audit.PolicyRuleEvaluator, sink audit.Sink) (*audit.AuditContext, error) {
 	ctx := req.Context()
+	ac := audit.AuditContextFrom(ctx)
+	if ac == nil {
+		// Auditing not configured.
+		return nil, nil
+	}
 
 	attribs, err := GetAuthorizerAttributes(ctx)
 	if err != nil {
-		return req, nil, nil, fmt.Errorf("failed to GetAuthorizerAttributes: %v", err)
+		return ac, fmt.Errorf("failed to GetAuthorizerAttributes: %v", err)
 	}
 
-	level, omitStages := policy.LevelAndStages(attribs)
-	audit.ObservePolicyLevel(level)
-	if level == auditinternal.LevelNone {
-		// Don't audit.
-		return req, nil, nil, nil
-	}
-
-	ev, err := audit.NewEventFromRequest(req, level, attribs)
+	rac := policy.EvaluatePolicyRule(attribs)
+	audit.ObservePolicyLevel(ctx, rac.Level)
+	err = ac.Init(rac, sink)
 	if err != nil {
-		return req, nil, nil, fmt.Errorf("failed to complete audit event from request: %v", err)
+		return nil, fmt.Errorf("failed to initialize audit context: %w", err)
+	}
+	if rac.Level == auditinternal.LevelNone {
+		// Don't audit.
+		return ac, nil
 	}
 
-	req = req.WithContext(request.WithAuditEvent(ctx, ev))
+	requestReceivedTimestamp, ok := request.ReceivedTimestampFrom(ctx)
+	if !ok {
+		requestReceivedTimestamp = time.Now()
+	}
+	audit.LogRequestMetadata(ctx, req, requestReceivedTimestamp, attribs)
 
-	return req, ev, omitStages, nil
+	return ac, nil
 }
 
-func processAuditEvent(sink audit.Sink, ev *auditinternal.Event, omitStages []auditinternal.Stage) bool {
-	for _, stage := range omitStages {
-		if ev.Stage == stage {
-			return true
-		}
+// writeLatencyToAnnotation writes the latency incurred in different
+// layers of the apiserver to the annotations of the audit object.
+// it should be invoked after ev.StageTimestamp has been set appropriately.
+func writeLatencyToAnnotation(ctx context.Context) {
+	ac := audit.AuditContextFrom(ctx)
+	// we will track latency in annotation only when the total latency
+	// of the given request exceeds 500ms, this is in keeping with the
+	// traces in rest/handlers for create, delete, update,
+	// get, list, and deletecollection.
+	const threshold = 500 * time.Millisecond
+	latency := ac.GetEventStageTimestamp().Sub(ac.GetEventRequestReceivedTimestamp().Time)
+	if latency <= threshold {
+		return
 	}
 
-	if ev.Stage == auditinternal.StageRequestReceived {
-		ev.StageTimestamp = metav1.NewMicroTime(ev.RequestReceivedTimestamp.Time)
-	} else {
-		ev.StageTimestamp = metav1.NewMicroTime(time.Now())
+	// if we are tracking latency incurred inside different layers within
+	// the apiserver, add these as annotation to the audit event object.
+	layerLatencies := request.AuditAnnotationsFromLatencyTrackers(ctx)
+	if len(layerLatencies) == 0 {
+		// latency tracking is not enabled for this request
+		return
 	}
-	audit.ObserveEvent()
-	return sink.ProcessEvents(ev)
+
+	// record the total latency for this request, for convenience.
+	layerLatencies["apiserver.latency.k8s.io/total"] = latency.String()
+	audit.AddAuditAnnotationsMap(ctx, layerLatencies)
 }
 
-func decorateResponseWriter(responseWriter http.ResponseWriter, ev *auditinternal.Event, sink audit.Sink, omitStages []auditinternal.Stage) http.ResponseWriter {
+func decorateResponseWriter(ctx context.Context, responseWriter http.ResponseWriter, processResponseStartedStage bool) http.ResponseWriter {
 	delegate := &auditResponseWriter{
+		ctx:            ctx,
 		ResponseWriter: responseWriter,
-		event:          ev,
-		sink:           sink,
-		omitStages:     omitStages,
+
+		processResponseStartedStage: processResponseStartedStage,
 	}
 
-	// check if the ResponseWriter we're wrapping is the fancy one we need
-	// or if the basic is sufficient
-	_, cn := responseWriter.(http.CloseNotifier)
-	_, fl := responseWriter.(http.Flusher)
-	_, hj := responseWriter.(http.Hijacker)
-	if cn && fl && hj {
-		return &fancyResponseWriterDelegator{delegate}
-	}
-	return delegate
+	return responsewriter.WrapForHTTP1Or2(delegate)
 }
 
 var _ http.ResponseWriter = &auditResponseWriter{}
+var _ responsewriter.UserProvidedDecorator = &auditResponseWriter{}
 
 // auditResponseWriter intercepts WriteHeader, sets it in the event. If the sink is set, it will
 // create immediately an event (for long running requests).
 type auditResponseWriter struct {
 	http.ResponseWriter
-	event      *auditinternal.Event
-	once       sync.Once
-	sink       audit.Sink
-	omitStages []auditinternal.Stage
+	ctx  context.Context
+	once sync.Once
+
+	processResponseStartedStage bool
 }
 
-func (a *auditResponseWriter) setHttpHeader() {
-	a.ResponseWriter.Header().Set(auditinternal.HeaderAuditID, string(a.event.AuditID))
+func (a *auditResponseWriter) Unwrap() http.ResponseWriter {
+	return a.ResponseWriter
 }
 
 func (a *auditResponseWriter) processCode(code int) {
 	a.once.Do(func() {
-		if a.event.ResponseStatus == nil {
-			a.event.ResponseStatus = &metav1.Status{}
-		}
-		a.event.ResponseStatus.Code = int32(code)
-		a.event.Stage = auditinternal.StageResponseStarted
-
-		if a.sink != nil {
-			processAuditEvent(a.sink, a.event, a.omitStages)
+		ac := audit.AuditContextFrom(a.ctx)
+		ac.SetEventResponseStatusCode(int32(code))
+		if a.processResponseStartedStage {
+			ac.ProcessEventStage(a.ctx, auditinternal.StageResponseStarted)
 		}
 	})
 }
@@ -209,44 +216,19 @@ func (a *auditResponseWriter) processCode(code int) {
 func (a *auditResponseWriter) Write(bs []byte) (int, error) {
 	// the Go library calls WriteHeader internally if no code was written yet. But this will go unnoticed for us
 	a.processCode(http.StatusOK)
-	a.setHttpHeader()
 	return a.ResponseWriter.Write(bs)
 }
 
 func (a *auditResponseWriter) WriteHeader(code int) {
 	a.processCode(code)
-	a.setHttpHeader()
 	a.ResponseWriter.WriteHeader(code)
 }
 
-// fancyResponseWriterDelegator implements http.CloseNotifier, http.Flusher and
-// http.Hijacker which are needed to make certain http operation (e.g. watch, rsh, etc)
-// working.
-type fancyResponseWriterDelegator struct {
-	*auditResponseWriter
-}
-
-func (f *fancyResponseWriterDelegator) CloseNotify() <-chan bool {
-	return f.ResponseWriter.(http.CloseNotifier).CloseNotify()
-}
-
-func (f *fancyResponseWriterDelegator) Flush() {
-	f.ResponseWriter.(http.Flusher).Flush()
-}
-
-func (f *fancyResponseWriterDelegator) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+func (a *auditResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	// fake a response status before protocol switch happens
-	f.processCode(http.StatusSwitchingProtocols)
+	a.processCode(http.StatusSwitchingProtocols)
 
-	// This will be ignored if WriteHeader() function has already been called.
-	// It's not guaranteed Audit-ID http header is sent for all requests.
-	// For example, when user run "kubectl exec", apiserver uses a proxy handler
-	// to deal with the request, users can only get http headers returned by kubelet node.
-	f.setHttpHeader()
-
-	return f.ResponseWriter.(http.Hijacker).Hijack()
+	// the outer ResponseWriter object returned by WrapForHTTP1Or2 implements
+	// http.Hijacker if the inner object (a.ResponseWriter) implements http.Hijacker.
+	return a.ResponseWriter.(http.Hijacker).Hijack()
 }
-
-var _ http.CloseNotifier = &fancyResponseWriterDelegator{}
-var _ http.Flusher = &fancyResponseWriterDelegator{}
-var _ http.Hijacker = &fancyResponseWriterDelegator{}

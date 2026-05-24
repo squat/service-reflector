@@ -26,6 +26,7 @@ import (
 	"k8s.io/apiserver/pkg/server/resourceconfig"
 	serverstore "k8s.io/apiserver/pkg/server/storage"
 	cliflag "k8s.io/component-base/cli/flag"
+	"k8s.io/klog/v2"
 )
 
 // APIEnablementOptions contains the options for which resources to turn on and off.
@@ -42,12 +43,18 @@ func NewAPIEnablementOptions() *APIEnablementOptions {
 
 // AddFlags adds flags for a specific APIServer to the specified FlagSet
 func (s *APIEnablementOptions) AddFlags(fs *pflag.FlagSet) {
+	if s == nil {
+		return
+	}
 	fs.Var(&s.RuntimeConfig, "runtime-config", ""+
-		"A set of key=value pairs that describe runtime configuration that may be passed "+
-		"to apiserver. <group>/<version> (or <version> for the core group) key can be used to "+
-		"turn on/off specific api versions. api/all is special key to control all api versions, "+
-		"be careful setting it false, unless you know what you do. api/legacy is deprecated, "+
-		"we will remove it in the future, so stop using it.")
+		"A set of key=value pairs that enable or disable built-in APIs. Supported options are:\n"+
+		"v1=true|false for the core API group\n"+
+		"<group>/<version>=true|false for a specific API group and version (e.g. apps/v1=true)\n"+
+		"api/all=true|false controls all API versions\n"+
+		"api/ga=true|false controls all API versions of the form v[0-9]+\n"+
+		"api/beta=true|false controls all API versions of the form v[0-9]+beta[0-9]+\n"+
+		"api/alpha=true|false controls all API versions of the form v[0-9]+alpha[0-9]+\n"+
+		"api/legacy is deprecated, and will be removed in a future version")
 }
 
 // Validate validates RuntimeConfig with a list of registries.
@@ -55,15 +62,15 @@ func (s *APIEnablementOptions) AddFlags(fs *pflag.FlagSet) {
 // But in the advanced (and usually not recommended) case of delegated apiservers there can be more.
 // Validate will filter out the known groups of each registry.
 // If anything is left over after that, an error is returned.
-func (s *APIEnablementOptions) Validate(registries ...GroupRegisty) []error {
+func (s *APIEnablementOptions) Validate(registries ...GroupRegistry) []error {
 	if s == nil {
 		return nil
 	}
 
 	errors := []error{}
-	if s.RuntimeConfig["api/all"] == "false" && len(s.RuntimeConfig) == 1 {
+	if s.RuntimeConfig[resourceconfig.APIAll] == "false" && len(s.RuntimeConfig) == 1 {
 		// Do not allow only set api/all=false, in such case apiserver startup has no meaning.
-		return append(errors, fmt.Errorf("invalid key with only api/all=false"))
+		return append(errors, fmt.Errorf("invalid key with only %v=false", resourceconfig.APIAll))
 	}
 
 	groups, err := resourceconfig.ParseGroups(s.RuntimeConfig)
@@ -84,18 +91,45 @@ func (s *APIEnablementOptions) Validate(registries ...GroupRegisty) []error {
 
 // ApplyTo override MergedResourceConfig with defaults and registry
 func (s *APIEnablementOptions) ApplyTo(c *server.Config, defaultResourceConfig *serverstore.ResourceConfig, registry resourceconfig.GroupVersionRegistry) error {
-
 	if s == nil {
 		return nil
 	}
 
 	mergedResourceConfig, err := resourceconfig.MergeAPIResourceConfigs(defaultResourceConfig, s.RuntimeConfig, registry)
+	if err != nil {
+		return err
+	}
+	// apply emulation forward compatibility to the api enablement if applicable.
+	if c.EmulationForwardCompatible {
+		mergedResourceConfig, err = resourceconfig.EmulationForwardCompatibleResourceConfig(mergedResourceConfig, s.RuntimeConfig, registry)
+	}
+
 	c.MergedResourceConfig = mergedResourceConfig
+
+	binVersion, emulatedVersion := c.EffectiveVersion.BinaryVersion(), c.EffectiveVersion.EmulationVersion()
+	if binVersion != nil && emulatedVersion != nil && (binVersion.Major() != emulatedVersion.Major() || binVersion.Minor() != emulatedVersion.Minor()) {
+		for _, version := range registry.PrioritizedVersionsAllGroups() {
+			if strings.Contains(version.Version, "alpha") {
+				// Check if this alpha API is actually enabled before warning
+				entireVersionEnabled := c.MergedResourceConfig.ExplicitGroupVersionConfigs[version]
+				individualResourceEnabled := false
+				for resource, enabled := range c.MergedResourceConfig.ExplicitResourceConfigs {
+					if enabled && resource.Group == version.Group && resource.Version == version.Version {
+						individualResourceEnabled = true
+						break
+					}
+				}
+				if entireVersionEnabled || individualResourceEnabled {
+					klog.Warningf("alpha api enabled with emulated version %s instead of the binary's version %s, this is unsupported, proceed at your own risk: api=%s", emulatedVersion, binVersion, version.String())
+				}
+			}
+		}
+	}
 
 	return err
 }
 
-func unknownGroups(groups []string, registry GroupRegisty) []string {
+func unknownGroups(groups []string, registry GroupRegistry) []string {
 	unknownGroups := []string{}
 	for _, group := range groups {
 		if !registry.IsGroupRegistered(group) {
@@ -105,8 +139,8 @@ func unknownGroups(groups []string, registry GroupRegisty) []string {
 	return unknownGroups
 }
 
-// GroupRegisty provides a method to check whether given group is registered.
-type GroupRegisty interface {
+// GroupRegistry provides a method to check whether given group is registered.
+type GroupRegistry interface {
 	// IsRegistered returns true if given group is registered.
 	IsGroupRegistered(group string) bool
 }

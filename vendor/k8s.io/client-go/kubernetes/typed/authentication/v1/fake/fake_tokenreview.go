@@ -18,7 +18,27 @@ limitations under the License.
 
 package fake
 
-// FakeTokenReviews implements TokenReviewInterface
-type FakeTokenReviews struct {
+import (
+	v1 "k8s.io/api/authentication/v1"
+	gentype "k8s.io/client-go/gentype"
+	authenticationv1 "k8s.io/client-go/kubernetes/typed/authentication/v1"
+)
+
+// fakeTokenReviews implements TokenReviewInterface
+type fakeTokenReviews struct {
+	*gentype.FakeClient[*v1.TokenReview]
 	Fake *FakeAuthenticationV1
+}
+
+func newFakeTokenReviews(fake *FakeAuthenticationV1) authenticationv1.TokenReviewInterface {
+	return &fakeTokenReviews{
+		gentype.NewFakeClient[*v1.TokenReview](
+			fake.Fake,
+			"",
+			v1.SchemeGroupVersion.WithResource("tokenreviews"),
+			v1.SchemeGroupVersion.WithKind("TokenReview"),
+			func() *v1.TokenReview { return &v1.TokenReview{} },
+		),
+		fake,
+	}
 }

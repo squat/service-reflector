@@ -20,13 +20,12 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"reflect"
 	"sort"
 	"strings"
 	"sync"
 
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 // Factory is a function that returns an Interface for admission decisions.
@@ -81,11 +80,11 @@ func (ps *Plugins) Register(name string, plugin Factory) {
 		ps.registry = map[string]Factory{}
 	}
 
-	klog.V(1).Infof("Registered admission plugin %q", name)
+	klog.V(1).InfoS("Registered admission plugin", "plugin", name)
 	ps.registry[name] = plugin
 }
 
-// getPlugin creates an instance of the named plugin.  It returns `false` if the
+// getPlugin creates an instance of the named plugin.  It returns `false` if
 // the name is not known. The error is returned only when the named provider was
 // known but failed to initialize.  The config parameter specifies the io.Reader
 // handler of the configuration file for the cloud provider, or nil for no configuration.
@@ -115,7 +114,7 @@ func splitStream(config io.Reader) (io.Reader, io.Reader, error) {
 		return nil, nil, nil
 	}
 
-	configBytes, err := ioutil.ReadAll(config)
+	configBytes, err := io.ReadAll(config)
 	if err != nil {
 		return nil, nil, err
 	}
