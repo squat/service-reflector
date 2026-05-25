@@ -20,6 +20,7 @@ import (
 
 	"github.com/go-logr/logr"
 	discoveryv1 "k8s.io/api/discovery/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -39,6 +40,8 @@ type ManagerOptions struct {
 	Namespace string
 	// RemoteConfigs maps remoteID -> REST config for each remote Emitter.
 	RemoteConfigs map[string]*rest.Config
+	// ReflectorSelector filters which remote ServiceExports are processed.
+	ReflectorSelector labels.Selector
 	// Log is the base logger.
 	Log logr.Logger
 }
@@ -118,6 +121,7 @@ func Start(ctx context.Context, opts ManagerOptions) error {
 			remoteConfig,
 			mgr.GetClient(),
 			opts.Namespace,
+			opts.ReflectorSelector,
 			conflictDetector,
 			opts.Log.WithName("Watcher"),
 		)
