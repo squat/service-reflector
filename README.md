@@ -95,6 +95,7 @@ Usage of service-reflector:
       --emitter.permit-address-sharing                 If true, SO_REUSEADDR will be used when binding the port. This allows binding to wildcard IPs like 0.0.0.0 and specific IPs in parallel, and it avoids waiting for the kernel to release sockets in TIME_WAIT state. [default=false]
       --emitter.permit-port-sharing                    If true, SO_REUSEPORT will be used when binding the port, which allows more than one instance to bind on the same address and port. [default=false]
       --emitter.secure-port int                        The port on which to serve HTTPS with authentication and authorization. If 0, don't serve HTTPS at all. (default 6443)
+      --emitter.selector string                        Label selector to filter ServiceExports watched by the emitter (e.g. app.kubernetes.io/name=foo).
       --emitter.tls-cert-file string                   File containing the default x509 Certificate for HTTPS. (CA cert, if any, concatenated after server cert). If HTTPS serving is enabled, and --tls-cert-file and --tls-private-key-file are not provided, a self-signed certificate and key are generated for the public address and saved to the directory specified by --cert-dir.
       --emitter.tls-cipher-suites strings              Comma-separated list of cipher suites for the server. If omitted, the default Go cipher suites will be used. 
                                                        Preferred values: TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384, TLS_CHACHA20_POLY1305_SHA256, TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA, TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA, TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384, TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305, TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256, TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA, TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA, TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384, TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305, TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256. 
@@ -106,7 +107,9 @@ Usage of service-reflector:
       --listen string                                  Address to listen for health and metrics. (default ":9090")
       --log-level string                               Log level to use. Possible values: debug, info, warn, error (default "info")
       --namespace string                               Namespace to watch (empty = all).
-      --source-api url                                 URL of a remote Emitter to watch (repeatable).
-      --source-kubeconfig stringArray                  Kubeconfig for a remote cluster (repeatable).
+      --reflector                                      Run the local controller manager (reconcilers + watchers). (default true)
+      --reflector.selector string                      Label selector to filter remote ServiceExports processed by the reflector (e.g. app.kubernetes.io/name=foo).
+      --reflector.source-api url                       URL of a remote Emitter to watch (repeatable).
+      --reflector.source-kubeconfig stringArray        Kubeconfig for a remote cluster (repeatable).
       --version                                        Print version and exit.
 ```

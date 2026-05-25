@@ -26,6 +26,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -54,6 +55,8 @@ type Watcher struct {
 	localClient client.Client
 	// namespace restricts which namespaces are watched (empty = all).
 	namespace string
+	// selector filters which remote ServiceExports are processed.
+	selector labels.Selector
 	// conflictDetector tracks remote ServiceExport specs for cross-cluster conflict detection.
 	conflictDetector *ConflictDetector
 	log              logr.Logger
@@ -66,6 +69,7 @@ func NewWatcher(
 	remoteConfig *rest.Config,
 	localClient client.Client,
 	namespace string,
+	selector labels.Selector,
 	conflictDetector *ConflictDetector,
 	log logr.Logger,
 ) *Watcher {
@@ -75,6 +79,7 @@ func NewWatcher(
 		remoteConfig:     remoteConfig,
 		localClient:      localClient,
 		namespace:        namespace,
+		selector:         selector,
 		conflictDetector: conflictDetector,
 		log:              log.WithValues("remote", remoteID),
 	}
@@ -100,6 +105,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 	}
 
 	listSE := func(opts metav1.ListOptions) (runtime.Object, error) {
+		opts.LabelSelector = w.selector.String()
 		if w.namespace != "" {
 			return dynClient.Resource(seGVR).Namespace(w.namespace).List(ctx, opts)
 		}
@@ -107,6 +113,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 	}
 	watchSE := func(opts metav1.ListOptions) (watch.Interface, error) {
 		opts.Watch = true
+		opts.LabelSelector = w.selector.String()
 		if w.namespace != "" {
 			return dynClient.Resource(seGVR).Namespace(w.namespace).Watch(ctx, opts)
 		}

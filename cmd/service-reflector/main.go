@@ -34,6 +34,7 @@ import (
 	"go.uber.org/zap/zapcore"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	genericapiserver "k8s.io/apiserver/pkg/server"
 	genericoptions "k8s.io/apiserver/pkg/server/options"
@@ -97,19 +98,25 @@ type options struct {
 	namespace    string
 	printVersion bool
 
-	runEmitter bool
-	secure     *genericoptions.SecureServingOptionsWithLoopback
+	runEmitter   bool
+	runReflector bool
+	secure       *genericoptions.SecureServingOptionsWithLoopback
+
+	emitterSelector   string
+	reflectorSelector string
 
 	sourceAPIs        urls
 	sourceKubeconfigs []string
 
 	// Completed fields
-	logger             logr.Logger
-	localConfig        *restclient.Config
-	apiserverConfig    *apiserver.Config
-	apiserverCompleted apiserver.CompletedConfig
-	seInformer         cache.SharedIndexInformer
-	esInformer         cache.SharedIndexInformer
+	logger                  logr.Logger
+	localConfig             *restclient.Config
+	apiserverConfig         *apiserver.Config
+	apiserverCompleted      apiserver.CompletedConfig
+	seInformer              cache.SharedIndexInformer
+	esInformer              cache.SharedIndexInformer
+	emitterSelectorParsed   labels.Selector
+	reflectorSelectorParsed labels.Selector
 }
 
 func newOptions() *options {
@@ -134,15 +141,24 @@ func (o *options) flagSet() *pflag.FlagSet {
 	f.StringVar(&o.namespace, "namespace", metav1.NamespaceAll, "Namespace to watch (empty = all).")
 	f.BoolVar(&o.printVersion, "version", false, "Print version and exit.")
 	f.BoolVar(&o.runEmitter, "emitter", true, "Run the local Emitter API server.")
-	f.Var(&o.sourceAPIs, "source-api", "URL of a remote Emitter to watch (repeatable).")
-	f.StringArrayVar(&o.sourceKubeconfigs, "source-kubeconfig", nil, "Kubeconfig for a remote cluster (repeatable).")
+	f.BoolVar(&o.runReflector, "reflector", true, "Run the local controller manager (reconcilers + watchers).")
 
 	emitter := pflag.NewFlagSet("emitter", pflag.ExitOnError)
 	emitter.SetNormalizeFunc(func(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		return pflag.NormalizedName("emitter." + name)
 	})
+	emitter.StringVar(&o.emitterSelector, "selector", "", "Label selector to filter ServiceExports watched by the emitter (e.g. app.kubernetes.io/name=foo).")
 	o.secure.AddFlags(emitter)
 	f.AddFlagSet(emitter)
+
+	reflector := pflag.NewFlagSet("reflector", pflag.ExitOnError)
+	reflector.SetNormalizeFunc(func(_ *pflag.FlagSet, name string) pflag.NormalizedName {
+		return pflag.NormalizedName("reflector." + name)
+	})
+	reflector.StringVar(&o.reflectorSelector, "selector", "", "Label selector to filter remote ServiceExports processed by the reflector (e.g. app.kubernetes.io/name=foo).")
+	reflector.Var(&o.sourceAPIs, "source-api", "URL of a remote Emitter to watch (repeatable).")
+	reflector.StringArrayVar(&o.sourceKubeconfigs, "source-kubeconfig", nil, "Kubeconfig for a remote cluster (repeatable).")
+	f.AddFlagSet(reflector)
 
 	return f
 }
@@ -153,6 +169,32 @@ func (o *options) complete() []error {
 
 	if o.clusterID == "" {
 		errs = append(errs, fmt.Errorf("--cluster-id is required"))
+	}
+
+	if !o.runEmitter && !o.runReflector {
+		errs = append(errs, fmt.Errorf("at least one of --emitter or --reflector must be enabled"))
+	}
+
+	// Parse emitter label selector.
+	o.emitterSelectorParsed = labels.Everything()
+	if o.emitterSelector != "" {
+		parsed, err := labels.Parse(o.emitterSelector)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("invalid --emitter.selector %q: %w", o.emitterSelector, err))
+		} else {
+			o.emitterSelectorParsed = parsed
+		}
+	}
+
+	// Parse reflector label selector.
+	o.reflectorSelectorParsed = labels.Everything()
+	if o.reflectorSelector != "" {
+		parsed, err := labels.Parse(o.reflectorSelector)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("invalid --reflector.selector %q: %w", o.reflectorSelector, err))
+		} else {
+			o.reflectorSelectorParsed = parsed
+		}
 	}
 
 	cfg, err := clientcmd.BuildConfigFromFlags("", o.kubeconfig)
@@ -208,7 +250,11 @@ func (o *options) completeEmitter() error {
 	if err != nil {
 		return fmt.Errorf("creating dynamic client for emitter: %w", err)
 	}
-	dynFactory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(dynClient, 0, o.namespace, nil)
+
+	tweakListOptions := func(lo *metav1.ListOptions) {
+		lo.LabelSelector = o.emitterSelectorParsed.String()
+	}
+	dynFactory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(dynClient, 0, o.namespace, tweakListOptions)
 
 	seGVR := schema.GroupVersionResource{
 		Group:    v1beta1.GroupVersion.Group,
@@ -282,8 +328,7 @@ func Main() error {
 		}
 	}
 
-	// Controller manager (reconcilers + watchers).
-	{
+	if o.runReflector {
 		remoteConfigs, err := buildRemoteConfigs(o)
 		if err != nil {
 			cancel()
@@ -292,11 +337,12 @@ func Main() error {
 		g.Add(func() error {
 			o.logger.Info("starting controller manager")
 			return controller.Start(ctx, controller.ManagerOptions{
-				KubeConfig:    o.localConfig,
-				ClusterID:     o.clusterID,
-				Namespace:     o.namespace,
-				RemoteConfigs: remoteConfigs,
-				Log:           o.logger,
+				KubeConfig:        o.localConfig,
+				ClusterID:         o.clusterID,
+				Namespace:         o.namespace,
+				RemoteConfigs:     remoteConfigs,
+				ReflectorSelector: o.reflectorSelectorParsed,
+				Log:               o.logger,
 			})
 		}, func(error) { cancel() })
 	}

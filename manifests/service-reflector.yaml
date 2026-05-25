@@ -6,7 +6,9 @@ metadata:
     app.kubernetes.io/name: service-reflector
 data:
   cluster-id: ""
-  source-api: ""
+  emitter-selector: ""
+  reflector-selector: ""
+  reflector-source-api: ""
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -32,7 +34,7 @@ rules:
   - watch
   - get
 - apiGroups:
-  - "discovery.k8s.io"
+  - discovery.k8s.io
   resources:
   - endpointslices
   verbs:
@@ -44,7 +46,7 @@ rules:
   - patch
   - delete
 - apiGroups:
-  - "multicluster.x-k8s.io"
+  - multicluster.x-k8s.io
   resources:
   - serviceexports
   - serviceimports
@@ -57,7 +59,7 @@ rules:
   - patch
   - delete
 - apiGroups:
-  - "multicluster.x-k8s.io"
+  - multicluster.x-k8s.io
   resources:
   - serviceexports/status
   - serviceimports/status
@@ -105,7 +107,9 @@ spec:
         - --cluster-id=$(CLUSTER_ID)
         - --emitter.secure-port=6443
         - --emitter.insecure-port=8080
-        - --source-api=$(SOURCE_API)
+        - --emitter.selector=$(EMITTER_SELECTOR)
+        - --reflector.selector=$(REFLECTOR_SELECTOR)
+        - --reflector.source-api=$(REFLECTOR_SOURCE_API)
         - --listen=0.0.0.0:9090
         env:
         - name: CLUSTER_ID
@@ -113,11 +117,21 @@ spec:
             configMapKeyRef:
               name: service-reflector
               key: cluster-id
-        - name: SOURCE_API
+        - name: EMITTER_SELECTOR
           valueFrom:
             configMapKeyRef:
               name: service-reflector
-              key: source-api
+              key: emitter-selector
+        - name: REFLECTOR_SELECTOR
+          valueFrom:
+            configMapKeyRef:
+              name: service-reflector
+              key: reflector-selector
+        - name: REFLECTOR_SOURCE_API
+          valueFrom:
+            configMapKeyRef:
+              name: service-reflector
+              key: reflector-source-api
         ports:
         - containerPort: 9090
           name: metrics
